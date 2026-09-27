@@ -1,1 +1,58 @@
+name: Stock Data Agent
+
+on:
+  schedule:
+    - cron: "25 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stock-data-agent
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh persistent stock data
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+          PERSISTED_CACHE_DIR: data_cache
+          AGENT_PRICE_LIMIT: "2200"
+          AGENT_FINNHUB_LIMIT: "1500"
+          AGENT_FINNHUB_BATCH: "40"
+          AGENT_MAX_SECONDS: "3000"
+        run: python agent_refresh.py
+
+      - name: Commit refreshed cache and agent status
+        run: |
+          git config user.name "global-stock-ranker-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f data_cache/agent_status.json 2>/dev/null || true
+          find data_cache -maxdepth 1 -type f -name '*.csv.gz' -print0 | xargs -0 -r git add -f
+          if git diff --cached --quiet; then
+            echo "No durable cache changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(data): refresh stock cache"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push
 
