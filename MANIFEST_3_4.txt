@@ -1,0 +1,37 @@
+Global Stock Ranker 3.4.0 – Repository-Dateien
+
+Kern:
+app.py
+settings.py
+universe.py
+data_sources.py
+pipeline.py
+scoring.py
+signals.py
+history.py
+demo.py
+persistence.py
+refresh_engine.py
+agent_refresh.py
+requirements.txt
+VERSION.txt
+
+Automatisierung:
+.github/workflows/stock-data-agent.yml
+data_cache/.gitkeep
+STOCK_DATA_AGENT_WORKFLOW.yml  (sichtbare Kopie für iPhone-Setup)
+INSTALL_AGENT_IPHONE.md
+
+Dokumentation/Tests:
+README.md
+README_IPHONE_OHNE_TERMINAL.md
+UPGRADE_3_4.md
+CHANGELOG.md
+VALIDATION.md
+tests/test_core.py
+
+Nach dem Upload können alte Paketdateien im Repository gelöscht werden, z. B.:
+global_stock_ranker_v3_3_1_app.py
+global_stock_ranker_v3_3_2_complete.zip
+
+Wichtig: FINNHUB_API_KEY und SEC_USER_AGENT gehören in Secrets, nicht in Dateien.

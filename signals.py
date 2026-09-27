@@ -161,7 +161,7 @@ def add_research_signals(df: pd.DataFrame) -> pd.DataFrame:
         val = row.get("score_valuation", np.nan)
         trisk = row.get("thesis_risk_score", np.nan)
         trend = str(row.get("trend", ""))
-        confidence = row.get("data_confidence", np.nan)
+        confidence = row.get("effective_data_confidence", row.get("data_confidence", np.nan))
         if pd.notna(trisk) and trisk >= FOCUS["thesis_review_risk"]:
             return "These prüfen"
         if pd.notna(confidence) and confidence < FOCUS["entry_confidence"]:

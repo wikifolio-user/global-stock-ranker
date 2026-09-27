@@ -21,11 +21,12 @@ from data_sources import (
 from demo import make_demo_universe
 from history import add_history_deltas, append_snapshot, load_history, merge_imported_history, symbol_history
 from persistence import bootstrap_local_cache
-from refresh_engine import RefreshPolicy, run_refresh_cycle
+from refresh_engine import RefreshPolicy, refresh_plan, run_refresh_cycle
 from pipeline import (
     FUNDAMENTAL_METRICS,
     assemble_snapshot,
     coverage_summary,
+    eligibility_masks,
     import_cache_bytes,
     load_cache,
     provenance_table,
@@ -42,6 +43,10 @@ from settings import (
     DEFAULT_MIN_CONFIDENCE,
     EXCLUDE_SPECIAL_SECTORS_DEFAULT,
     FINNHUB_DEFAULT_BATCH,
+    GLOBAL_LITE_ENABLED_DEFAULT,
+    GLOBAL_LITE_MIN_COMPLETENESS,
+    GLOBAL_LITE_MIN_CONFIDENCE,
+    GLOBAL_LITE_MIN_GROUPS,
     HISTORY_KEEP_DAYS,
     HISTORY_TOP_N,
     SPECIAL_SECTORS,
@@ -67,9 +72,10 @@ PATHS = {
 # files are kept, so interactive updates in the current process are never overwritten.
 PERSISTED_RESTORED = bootstrap_local_cache(PATHS, "data_cache")
 AGENT_STATUS_PATH = Path("data_cache/agent_status.json")
+AGENT_WORKFLOW_PATH = Path(".github/workflows/stock-data-agent.yml")
 
 st.set_page_config(
-    page_title="Global Stock Ranker 3.3.2",
+    page_title="Global Stock Ranker 3.4.0",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -202,9 +208,9 @@ def load_live_caches():
     )
 
 
-st.title("📈 Global Stock Ranker 3.3.2")
+st.title("📈 Global Stock Ranker 3.4.0")
 st.caption(
-    "Kostenloses Multi-Source-Research · intelligenter Cache · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo Chart · "
+    "Kostenloses Multi-Source-Research · Smart-Cache · Full + Global Lite · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo Chart · "
     "Qualität, Wachstum, FCF, Bilanz, Bewertung, DCF-Proxy, Trend und Veränderungshistorie."
 )
 
@@ -220,6 +226,14 @@ with st.sidebar:
         "Finanzwerte & REITs herausfiltern",
         value=EXCLUDE_SPECIAL_SECTORS_DEFAULT,
         help="Das Standardmodell ist für Banken/Versicherer/REITs nicht optimal. Diese benötigen Spezialmodelle.",
+    )
+    allow_global_lite = st.checkbox(
+        "Global Lite für internationale Aktien",
+        value=GLOBAL_LITE_ENABLED_DEFAULT,
+        help=(
+            "Lässt Nicht-US-Aktien mit einem kleineren, aber breit gestreuten Kennzahlensatz zu. "
+            "Sie erhalten einen deutlichen Confidence-/Ranking-Abschlag und werden als Global Lite markiert."
+        ),
     )
 
     st.divider()
@@ -241,10 +255,18 @@ with st.sidebar:
     st.subheader("Automatische Aktualisierung")
     auto_refresh = st.button("🔄 Alles intelligent aktualisieren", type="primary", width="stretch")
     st.caption(
-        "Ein Klick prüft zuerst, was bereits aktuell ist. Nur fehlende oder veraltete "
-        "Daten werden geladen: Universum → Kurse/Trend → SEC → Finnhub. "
-        "Provider-Limits werden automatisch berücksichtigt."
+        "Ein Klick setzt den vorhandenen Datenbestand fort. Frische Werte werden nicht erneut geladen: "
+        "Universum → fällige Kurse/Trend → fällige SEC-Daten → nächste Finnhub-Warteschlange. "
+        "Dünne, aber erfolgreiche Finnhub-Antworten werden ebenfalls gecacht, damit die Queue wirklich weiterläuft."
     )
+
+    if not AGENT_WORKFLOW_PATH.exists():
+        st.warning(
+            "🤖 Der dauerhafte GitHub-Datenagent ist in diesem Deployment noch nicht installiert. "
+            "Ohne ihn bleiben interaktive Updates nur im Streamlit-Laufzeit-Cache."
+        )
+    elif not AGENT_STATUS_PATH.exists():
+        st.info("🤖 Agent-Workflow ist installiert, aber es gibt noch keinen erfolgreichen Agent-Lauf.")
 
     if AGENT_STATUS_PATH.exists():
         try:
@@ -256,6 +278,17 @@ with st.sidebar:
                 st.caption(f"🤖 Hintergrund-Agent zuletzt: {finished} UTC{suffix}")
         except Exception:
             pass
+
+    try:
+        plan_now = refresh_plan(PATHS)
+        if int(plan_now.get("universe_rows", 0)) > 0:
+            st.caption(
+                f"📋 Aktuelle Queue: {int(plan_now.get('prices_due', 0))} Kurse fällig · "
+                f"{int(plan_now.get('finnhub_due', 0))} Finnhub-Aktien fällig · "
+                f"SEC {'fällig' if plan_now.get('sec_due') else 'frisch'}"
+            )
+    except Exception:
+        pass
 
     with st.expander("Erweiterte manuelle Aktualisierung"):
         refresh_universe = st.button("Weltuniversum erzwingen", width="stretch")
@@ -294,9 +327,9 @@ else:
                 finnhub_key=finnhub_key,
                 sec_user_agent=sec_user_agent,
                 policy=RefreshPolicy(
-                    price_limit=500,
-                    finnhub_limit=200,
-                    finnhub_batch=50,
+                    price_limit=600,
+                    finnhub_limit=240,
+                    finnhub_batch=40,
                     max_runtime_seconds=300,
                 ),
                 progress_cb=_progress,
@@ -307,6 +340,13 @@ else:
             yahoo_cache = result["yahoo"]
             price_cache = result["prices"]
             operation_messages.extend(result["messages"])
+            remaining = result.get("remaining") or {}
+            operation_messages.append((
+                "info",
+                f"Noch offen nach diesem Lauf: {int(remaining.get('prices_due', 0))} Kurs-Aktien · "
+                f"{int(remaining.get('finnhub_due', 0))} Finnhub-Aktien. "
+                "Ein weiterer Klick setzt genau dort fort; frische Daten werden übersprungen."
+            ))
             counters = result.get("counters", {})
             data_updated = any(int(v or 0) > 0 for v in counters.values())
             progress_bar.progress(1.0, text=f"Fertig in {result.get('elapsed_seconds', 0)} Sekunden.")
@@ -394,42 +434,52 @@ for kind, msg in operation_messages:
 history = load_history(PATHS["history"])
 scored_all = add_scores(raw)
 
-# Only sufficiently documented rows receive a global history rank. This prevents
-# sparse rows from looking artificially competitive.
-history_eligible = (
-    pd.to_numeric(scored_all.get("data_completeness"), errors="coerce").fillna(0) >= 55
-) & (
-    pd.to_numeric(scored_all.get("data_confidence"), errors="coerce").fillna(0) >= 55
+# History uses the same Full + Global-Lite evidence rule as the ranking.
+history_eligible, history_full, history_lite = eligibility_masks(
+    scored_all,
+    min_completeness=DEFAULT_MIN_COMPLETENESS,
+    min_confidence=DEFAULT_MIN_CONFIDENCE,
+    allow_global_lite=allow_global_lite,
 )
 scored_all["history_rank"] = np.nan
-eligible_idx = scored_all.loc[history_eligible].sort_values(["ranking_score", "score_total", "data_confidence"], ascending=False).index
+eligible_idx = scored_all.loc[history_eligible].sort_values(
+    ["ranking_score", "score_total", "effective_data_confidence"], ascending=False
+).index
 scored_all.loc[eligible_idx, "history_rank"] = np.arange(1, len(eligible_idx) + 1)
 
 scored_all = add_history_deltas(scored_all, history)
 scored_all = add_research_signals(scored_all)
 scored_all["category"] = [
     category_from_score(s, c, conf)
-    for s, c, conf in zip(scored_all["score_total"], scored_all["data_completeness"], scored_all.get("data_confidence", pd.Series(np.nan, index=scored_all.index)))
+    for s, c, conf in zip(
+        scored_all["score_total"],
+        scored_all.get("effective_data_completeness", scored_all["data_completeness"]),
+        scored_all.get("effective_data_confidence", scored_all.get("data_confidence", pd.Series(np.nan, index=scored_all.index))),
+    )
 ]
 
 if mode == "Live kostenlos" and data_updated and not scored_all.empty:
     try:
         # History stores the most investable rows, not sparse raw rows.
-        hist_source = scored_all.loc[history_eligible].sort_values(["ranking_score", "score_total", "data_confidence"], ascending=False)
+        hist_source = scored_all.loc[history_eligible].sort_values(["ranking_score", "score_total", "effective_data_confidence"], ascending=False)
         history = append_snapshot(hist_source, PATHS["history"], top_n=HISTORY_TOP_N, keep_days=HISTORY_KEEP_DAYS)
     except Exception as exc:
         st.warning(f"Verlauf konnte nicht gespeichert werden: {exc}")
 
-# UI filters.
+# UI filters. Full uses the sliders; Global Lite uses its own conservative
+# evidence thresholds and an explicit ranking penalty.
 scored = scored_all.copy()
-scored = scored[
-    (pd.to_numeric(scored["data_completeness"], errors="coerce").fillna(0) >= min_completeness)
-    & (pd.to_numeric(scored.get("data_confidence"), errors="coerce").fillna(0) >= min_confidence)
-]
+ranking_eligible, ranking_full, ranking_lite = eligibility_masks(
+    scored,
+    min_completeness=min_completeness,
+    min_confidence=min_confidence,
+    allow_global_lite=allow_global_lite,
+)
+scored = scored.loc[ranking_eligible].copy()
 if exclude_special and "sector" in scored.columns:
     scored = scored[~scored["sector"].astype(str).isin(SPECIAL_SECTORS)]
 
-scored = scored.sort_values(["ranking_score", "score_total", "data_confidence", "score_valuation"], ascending=False).reset_index(drop=True)
+scored = scored.sort_values(["ranking_score", "score_total", "effective_data_confidence", "score_valuation"], ascending=False).reset_index(drop=True)
 scored["rank"] = np.arange(1, len(scored) + 1)
 top100 = scored.head(TOP_N).copy()
 
@@ -437,6 +487,7 @@ coverage = coverage_summary(
     scored_all,
     min_completeness=min_completeness,
     min_confidence=min_confidence,
+    allow_global_lite=allow_global_lite,
 ) if mode != "Demo" else {
     "universe": len(raw), "eligible": len(raw), "coverage_pct": 100.0,
     "non_us_coverage_pct": 100.0, "status": "Demo",
@@ -454,9 +505,10 @@ k4.metric("Rankingstatus", str(coverage.get("status", "—")))
 
 if mode != "Demo" and str(coverage.get("status")) == "Vorläufig":
     st.warning(
-        "Die globale Ranking-Abdeckung ist noch niedrig. Die aktuelle Top-100-Liste ist **vorläufig** und kann US-/bereits angereicherte Aktien bevorzugen. "
-        "Nutze SEC + mehrere Finnhub-Ergänzungsläufe, bis der Rankingstatus belastbarer wird. "
-        f"Aktive Schwellen: Vollständigkeit ≥{min_completeness}, Confidence ≥{min_confidence}."
+        "Die globale Ranking-Abdeckung ist noch niedrig. Die Liste ist **vorläufig**. "
+        "Full-Datensätze und konservativ abgewertete Global-Lite-Datensätze werden getrennt gekennzeichnet. "
+        f"Full-Schwellen: Vollständigkeit ≥{min_completeness}, Confidence ≥{min_confidence}; "
+        f"Global Lite: ≥{GLOBAL_LITE_MIN_COMPLETENESS}% Lite-Vollständigkeit, ≥{GLOBAL_LITE_MIN_CONFIDENCE} Confidence und ≥{GLOBAL_LITE_MIN_GROUPS} Evidenzgruppen."
     )
 
 st.markdown(
@@ -464,6 +516,12 @@ st.markdown(
     f'{history["snapshot_date"].nunique() if not history.empty and "snapshot_date" in history.columns else 0} Historientage</div>',
     unsafe_allow_html=True,
 )
+if mode != "Demo":
+    st.caption(
+        f"Datenstufen: {int(coverage.get('full_eligible', 0))} Full · "
+        f"{int(coverage.get('lite_eligible', 0))} Global Lite · "
+        f"{int(coverage.get('eligible', 0))} rankingfähig."
+    )
 
 rank_tab, detail_tab, quality_tab, history_tab, method_tab, backup_tab = st.tabs(
     ["🏆 Top 100", "🔎 Aktie", "🧪 Datenqualität", "🕘 Historie", "🧭 Methodik", "💾 Backup"]
@@ -506,9 +564,10 @@ with rank_tab:
             "Ticker": filtered_top["symbol"],
             "Unternehmen": safe_series(filtered_top, "name").fillna(filtered_top["symbol"]),
             "Land": safe_series(filtered_top, "country").fillna(""),
+            "Datenstufe": safe_series(filtered_top, "data_tier").fillna(""),
             "Score": filtered_top["score_total"].round(1),
             "Ranking-Score": filtered_top["ranking_score"].round(1),
-            "Confidence": pd.to_numeric(filtered_top.get("data_confidence"), errors="coerce").round(0),
+            "Confidence": pd.to_numeric(filtered_top.get("effective_data_confidence"), errors="coerce").round(0),
             "Trend": filtered_top["trend"],
             "Score Δ": filtered_top["score_delta"].round(1),
             "Rang Δ": filtered_top["rank_delta"].round(0),
@@ -536,14 +595,14 @@ with rank_tab:
                 left, right = st.columns([3, 1])
                 left.markdown(f"**#{int(row['rank'])} · {row['symbol']} · {row.get('name', row['symbol'])}**")
                 left.caption(
-                    f"{row.get('country','')} · {row['trend']} · {row['research_focus']} · "
+                    f"{row.get('country','')} · {row.get('data_tier','')} · {row['trend']} · {row['research_focus']} · "
                     f"Bewertung: {row['valuation_band']} · Quellen: {row.get('fundamental_sources','—')}"
                 )
                 right.metric("Ranking", f"{row['ranking_score']:.1f}", delta=signed(row.get("score_delta")))
                 a, b, c = st.columns(3)
                 a.metric("Einstieg", f"{row['entry_setup_score']:.0f}/100")
                 b.metric("These-Risiko", f"{row['thesis_risk_score']:.0f}/100")
-                c.metric("Confidence", f"{row.get('data_confidence', np.nan):.0f}%")
+                c.metric("Confidence", f"{row.get('effective_data_confidence', np.nan):.0f}%")
                 st.caption(
                     f"ROIC {pct(row.get('returnOnInvestedCapitalTTM'))} · FCF Yield {pct(row.get('freeCashFlowYieldTTM'))} · "
                     f"DCF MoS {pct(row.get('dcf_margin_of_safety'))} · EPS {pct(row.get('epsGrowth'))} · "
@@ -575,8 +634,8 @@ with detail_tab:
 
         st.subheader(f"{row.get('name', row['symbol'])} ({row['symbol']})")
         st.caption(
-            f"{row.get('country','')} · {row.get('sector','')} · Quellen {row.get('fundamental_sources','—')} · "
-            f"Data Confidence {row.get('data_confidence', np.nan):.0f}%"
+            f"{row.get('country','')} · {row.get('sector','')} · Datenstufe {row.get('data_tier','—')} · "
+            f"Quellen {row.get('fundamental_sources','—')} · Confidence {row.get('effective_data_confidence', np.nan):.0f}%"
         )
 
         a, b, c, d = st.columns(4)
@@ -680,9 +739,12 @@ with quality_tab:
     st.subheader("Abdeckung & Datenvertrauen")
     q1, q2, q3, q4 = st.columns(4)
     q1.metric("Rankingstatus", str(coverage.get("status", "—")))
-    q2.metric("Rankingfähig", f"{int(coverage.get('eligible', 0)):,}".replace(",", "."))
-    q3.metric("Gesamt-Abdeckung", f"{float(coverage.get('coverage_pct', 0)):.1f}%")
+    q2.metric("Full", f"{int(coverage.get('full_eligible', 0)):,}".replace(",", "."))
+    q3.metric("Global Lite", f"{int(coverage.get('lite_eligible', 0)):,}".replace(",", "."))
     q4.metric("Nicht-US-Abdeckung", f"{float(coverage.get('non_us_coverage_pct', 0)):.1f}%")
+    st.caption(
+        f"Insgesamt rankingfähig: {int(coverage.get('eligible', 0)):,} · Gesamt-Abdeckung {float(coverage.get('coverage_pct', 0)):.1f}%".replace(",", ".")
+    )
 
     if mode != "Demo":
         provider_rows = [
@@ -713,9 +775,12 @@ with quality_tab:
 
     if not raw.empty and "country" in raw.columns:
         tmp = scored_all.copy()
-        tmp["_confidence"] = pd.to_numeric(tmp.get("data_confidence"), errors="coerce").fillna(0)
-        tmp["_completeness"] = pd.to_numeric(tmp.get("data_completeness"), errors="coerce").fillna(0)
-        tmp["_eligible"] = (tmp["_confidence"] >= min_confidence) & (tmp["_completeness"] >= min_completeness)
+        tmp["_confidence"] = pd.to_numeric(tmp.get("effective_data_confidence"), errors="coerce").fillna(0)
+        tmp["_completeness"] = pd.to_numeric(tmp.get("effective_data_completeness"), errors="coerce").fillna(0)
+        country_eligible, _, _ = eligibility_masks(
+            tmp, min_completeness=min_completeness, min_confidence=min_confidence, allow_global_lite=allow_global_lite
+        )
+        tmp["_eligible"] = country_eligible
         country_cov = tmp.groupby("country", dropna=False).agg(
             Aktien=("symbol", "count"),
             Ausreichend=("_eligible", "sum"),
@@ -729,7 +794,8 @@ with quality_tab:
 
     st.info(
         "Data Confidence bewertet **Vollständigkeit + Quellenqualität + Kursverfügbarkeit**. "
-        "Eine hohe Kennzahl macht die Daten nicht fehlerfrei, verhindert aber, dass sehr unvollständige Aktien im Ranking zu viel Gewicht bekommen."
+        "Global Lite verlangt zusätzlich mehrere unterschiedliche Evidenzgruppen und erhält einen Ranking-Abschlag. "
+        "Damit können internationale Aktien berücksichtigt werden, ohne dünne Daten mit Full-Datensätzen gleichzusetzen."
     )
 
 # ---------------------------------------------------------------------------
@@ -768,7 +834,7 @@ with method_tab:
     st.subheader("Methodik")
     st.markdown(
         """
-**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt. Yahoo dient in 3.3 nur noch über den crumb-freien v8-Chart-Endpunkt für Kurs- und Trenddaten; QuoteSummary-Fundamentals sind live deaktiviert.
+**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt. Yahoo dient nur über den crumb-freien v8-Chart-Endpunkt für Kurs- und Trenddaten; QuoteSummary-Fundamentals sind live deaktiviert. Der Smart-Cache lädt nur fehlende oder veraltete Werte neu.
 
 **100-Punkte-Modell.** Unternehmensqualität 20, Wachstum 15, Free Cashflow 15, Bilanz 10, Kapitalallokation 10, Moat-Proxy 10, Bewertung 15 und Risiko 5 Punkte. Harte Red Flags ziehen Punkte ab. Moat und Management werden ausdrücklich nur über quantitative Proxies angenähert.
 
@@ -778,7 +844,9 @@ with method_tab:
 
 **Reverse DCF.** Aus dem aktuellen FCF Yield wird berechnet, welches langfristige FCF-Wachstum ungefähr erforderlich wäre, um den aktuellen Preis unter den Modellannahmen zu rechtfertigen. Niedrigere implizite Erwartungen sind grundsätzlich leichter zu erfüllen als sehr hohe.
 
-**Rankingstatus.** Solange ein großer Teil der internationalen Aktien noch keine ausreichende Fundamentalabdeckung besitzt, wird das globale Ranking als *vorläufig* markiert. Das verhindert falsche Präzision.
+**Full vs. Global Lite.** Full verlangt die vollständigen Standard-Schwellen. Global Lite gilt ausschließlich für internationale Aktien und verlangt eine Mindestabdeckung über mehrere Evidenzgruppen. Lite-Datensätze erhalten einen ausdrücklichen Ranking-Abschlag; die Datenstufe bleibt in Tabelle und Detailansicht sichtbar.
+
+**Rankingstatus.** Solange ein großer Teil der internationalen Aktien weder Full noch Global Lite erreicht, wird das globale Ranking als *vorläufig* markiert. Das verhindert falsche Präzision.
         """
     )
 
@@ -788,7 +856,7 @@ with method_tab:
 with backup_tab:
     st.subheader("Backup für Streamlit Cloud")
     st.caption(
-        "Community-Cloud kann lokalen Speicher bei Neustarts zurücksetzen. Sichere deshalb gelegentlich die komplette Datenbasis als ZIP und spiele sie bei Bedarf wieder ein."
+        "Der GitHub-Datenagent hält data_cache dauerhaft im Repository. Interaktive Streamlit-Updates bleiben zusätzlich lokal; ein ZIP-Backup ist weiterhin eine manuelle Sicherheitskopie."
     )
     backup_bytes = build_backup_zip()
     st.download_button(

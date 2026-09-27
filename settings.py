@@ -1,10 +1,10 @@
-"""Zentrale Konfiguration des Global Stock Ranker 3.3.2.
+"""Zentrale Konfiguration des Global Stock Ranker 3.4.0.
 
 Die Datei ist bewusst einfach gehalten. Die meisten persönlichen Anpassungen können
 hier vorgenommen werden, ohne die Daten- oder UI-Logik anzufassen.
 """
 
-APP_VERSION = "3.3.2"
+APP_VERSION = "3.4.0"
 
 # -------------------------
 # Universum / Ranking
@@ -16,6 +16,17 @@ DEFAULT_MIN_COMPLETENESS = 55
 DEFAULT_MIN_CONFIDENCE = 60
 EXCLUDE_SPECIAL_SECTORS_DEFAULT = True
 SPECIAL_SECTORS = {"Financials", "Real Estate"}
+
+
+# Internationale Aktien dürfen mit einem konservativ abgewerteten "Global Lite"-
+# Datensatz ins Ranking, wenn die kostenlosen globalen Quellen nicht alle 19
+# Vollmodell-Kennzahlen liefern. Das verhindert eine künstliche US-Bevorzugung,
+# ohne dünne Datensätze wie Vollabdeckung zu behandeln.
+GLOBAL_LITE_ENABLED_DEFAULT = True
+GLOBAL_LITE_MIN_COMPLETENESS = 42
+GLOBAL_LITE_MIN_CONFIDENCE = 52
+GLOBAL_LITE_MIN_GROUPS = 4
+GLOBAL_LITE_RANKING_PENALTY = 0.88
 
 # Offizielle iShares-ACWI-Positionen (Large/Mid Caps, Industrie- + Schwellenländer).
 ACWI_HOLDINGS_URL = (

@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.4.0 – Global Lite, echte Queue-Fortsetzung & Agent-Härtung
+
+- Global-Lite-Datenstufe für internationale Aktien mit eigenem Completeness-/Confidence-Modell und explizitem Ranking-Abschlag.
+- Ranking-Abdeckung zählt Full und Global Lite konsistent; Datenstufe wird in UI/Detailansicht sichtbar.
+- Finnhub-Queue-Fix: erfolgreiche dünne Antworten werden nicht bei jedem Klick erneut geladen.
+- Konservativer Finnhub Symbol-Lookup-Fallback für internationale Symbolabweichungen.
+- Ein-Klick-Update zeigt Restqueue und lädt nur fällige Werte.
+- GitHub Actions Workflow commitet Cache und `agent_status.json` zuverlässig gemeinsam.
+- Agent nutzt dieselben Full-/Lite-Regeln wie Streamlit.
+- Mobile Header Fix und UTC-Zeitvergleich aus 3.3.1/3.3.2 enthalten.
+
 ## 3.3.2 – UTC-Zeitvergleich im Smart Update
 
 - Fehler `Invalid comparison between dtype=datetime64[ns] and Timestamp` behoben.

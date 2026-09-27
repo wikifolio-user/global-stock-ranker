@@ -10,10 +10,16 @@ import pandas as pd
 
 from history import append_snapshot, load_history
 from persistence import persisted_paths
-from pipeline import assemble_snapshot, coverage_summary, load_cache
-from refresh_engine import RefreshPolicy, run_refresh_cycle
+from pipeline import assemble_snapshot, coverage_summary, eligibility_masks
+from refresh_engine import RefreshPolicy, refresh_plan, run_refresh_cycle
 from scoring import add_scores
-from settings import HISTORY_KEEP_DAYS, HISTORY_TOP_N
+from settings import (
+    DEFAULT_MIN_COMPLETENESS,
+    DEFAULT_MIN_CONFIDENCE,
+    GLOBAL_LITE_ENABLED_DEFAULT,
+    HISTORY_KEEP_DAYS,
+    HISTORY_TOP_N,
+)
 
 
 DATA_DIR = Path(os.getenv("PERSISTED_CACHE_DIR", "data_cache"))
@@ -30,18 +36,17 @@ def main() -> int:
     finnhub_key = os.getenv("FINNHUB_API_KEY", "").strip()
     sec_user_agent = os.getenv("SEC_USER_AGENT", "").strip()
 
-    # Large enough to make meaningful daily progress, but conservative enough for
-    # free endpoints and the GitHub Actions time budget.
     policy = RefreshPolicy(
         price_limit=int(os.getenv("AGENT_PRICE_LIMIT", "2200")),
         finnhub_limit=int(os.getenv("AGENT_FINNHUB_LIMIT", "1500")),
-        finnhub_batch=int(os.getenv("AGENT_FINNHUB_BATCH", "50")),
+        finnhub_batch=int(os.getenv("AGENT_FINNHUB_BATCH", "40")),
         max_runtime_seconds=int(os.getenv("AGENT_MAX_SECONDS", "3000")),
     )
 
     status: dict[str, object] = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "ok": False,
+        "plan_before": refresh_plan(PATHS),
     }
     try:
         result = run_refresh_cycle(
@@ -56,32 +61,44 @@ def main() -> int:
             result["universe"], result["sec"], result["finnhub"], result["yahoo"], result["prices"]
         )
         scored = add_scores(snapshot)
-        eligible = (
-            pd.to_numeric(scored.get("data_completeness"), errors="coerce").fillna(0) >= 55
-        ) & (
-            pd.to_numeric(scored.get("data_confidence"), errors="coerce").fillna(0) >= 60
+        eligible, full, lite = eligibility_masks(
+            scored,
+            min_completeness=DEFAULT_MIN_COMPLETENESS,
+            min_confidence=DEFAULT_MIN_CONFIDENCE,
+            allow_global_lite=GLOBAL_LITE_ENABLED_DEFAULT,
         )
         scored["history_rank"] = np.nan
         idx = scored.loc[eligible].sort_values(
-            ["ranking_score", "score_total", "data_confidence"], ascending=False
+            ["ranking_score", "score_total", "effective_data_confidence"], ascending=False
         ).index
         scored.loc[idx, "history_rank"] = np.arange(1, len(idx) + 1)
         append_snapshot(
             scored.loc[eligible].sort_values(
-                ["ranking_score", "score_total", "data_confidence"], ascending=False
+                ["ranking_score", "score_total", "effective_data_confidence"], ascending=False
             ),
             PATHS["history"],
             top_n=HISTORY_TOP_N,
             keep_days=HISTORY_KEEP_DAYS,
         )
 
-        coverage = coverage_summary(scored, min_completeness=55, min_confidence=60)
+        coverage = coverage_summary(
+            scored,
+            min_completeness=DEFAULT_MIN_COMPLETENESS,
+            min_confidence=DEFAULT_MIN_CONFIDENCE,
+            allow_global_lite=GLOBAL_LITE_ENABLED_DEFAULT,
+        )
         status.update({
             "ok": True,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "elapsed_seconds": result["elapsed_seconds"],
             "counters": result["counters"],
             "coverage": coverage,
+            "plan_after": result.get("remaining") or refresh_plan(PATHS),
+            "tier_counts": {
+                "full": int(full.sum()),
+                "global_lite": int(lite.sum()),
+                "eligible": int(eligible.sum()),
+            },
             "messages": [m for _, m in result["messages"]],
             "cache_rows": {
                 "universe": len(result["universe"]),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -426,6 +427,75 @@ def enrich_yahoo_fundamentals(
 # Finnhub Basic Financials: free key, global ratios/metrics
 # ---------------------------------------------------------------------------
 
+def resolve_finnhub_symbol(
+    query: str,
+    api_key: str,
+    preferred_symbol: str = "",
+    original_symbol: str = "",
+    timeout: int = 20,
+) -> tuple[str | None, str | None]:
+    """Conservatively resolve an international symbol through Finnhub search.
+
+    Finnhub documents its own exchange symbology and exposes `/search` for ticker,
+    name and ISIN lookups. We only use this fallback after Basic Financials returned
+    no metrics, and only accept a candidate with a strong ticker/name match.
+    """
+    q = str(query or "").strip()
+    if not q:
+        return None, None
+    try:
+        r = requests.get(
+            f"{FINNHUB_BASE_URL}/search",
+            params={"q": q, "token": api_key},
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return None, f"LOOKUP_NETWORK: {str(exc)[:120]}"
+    if r.status_code == 429:
+        return None, "RATE_LIMIT"
+    if not r.ok:
+        return None, f"LOOKUP_HTTP_{r.status_code}"
+    try:
+        results = (r.json() or {}).get("result") or []
+    except Exception:
+        return None, "LOOKUP_JSON"
+    if not isinstance(results, list) or not results:
+        return None, None
+
+    preferred = str(preferred_symbol or "").upper()
+    raw_key = canonical_key(original_symbol or preferred_symbol)
+    query_tokens = {t for t in re.sub(r"[^A-Z0-9 ]", " ", q.upper()).split() if len(t) >= 3}
+
+    best_symbol = None
+    best_score = -1.0
+    for item in results[:12]:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        display = str(item.get("displaySymbol") or symbol).strip()
+        desc = str(item.get("description") or "").upper()
+        typ = str(item.get("type") or "").lower()
+        if not symbol:
+            continue
+        score = 0.0
+        if symbol.upper() == preferred or display.upper() == preferred:
+            score += 8.0
+        cand_key = canonical_key(display.split(".")[0])
+        if raw_key and cand_key == raw_key:
+            score += 5.0
+        if preferred and "." in preferred and symbol.upper().endswith(preferred[preferred.rfind("."):]):
+            score += 2.0
+        if "common" in typ or "stock" in typ or "equity" in typ:
+            score += 1.0
+        if query_tokens:
+            desc_tokens = set(re.sub(r"[^A-Z0-9 ]", " ", desc).split())
+            score += min(2.0, len(query_tokens & desc_tokens) * 0.5)
+        if score > best_score:
+            best_symbol, best_score = symbol, score
+
+    return (best_symbol, None) if best_symbol and best_score >= 4.0 else (None, None)
+
+
 def _metric(metric: dict[str, Any], *names: str) -> float:
     for name in names:
         if name in metric and metric[name] is not None:
@@ -549,10 +619,35 @@ def enrich_finnhub_fundamentals(
     if not api_key:
         raise DataSourceError("FINNHUB_API_KEY fehlt.")
     wanted = {str(s) for s in symbols}
-    work = universe[universe["symbol"].astype(str).isin(wanted)][["symbol", "provider_symbol"]].drop_duplicates("symbol")
+    cols = [c for c in ["symbol", "provider_symbol", "name", "country"] if c in universe.columns]
+    work = universe[universe["symbol"].astype(str).isin(wanted)][cols].drop_duplicates("symbol")
     rows: list[dict[str, Any]] = []
     for rec in work.itertuples(index=False):
-        row = fetch_finnhub_basic(str(rec.symbol), str(rec.provider_symbol), api_key)
+        symbol = str(getattr(rec, "symbol", ""))
+        provider_symbol = str(getattr(rec, "provider_symbol", ""))
+        row = fetch_finnhub_basic(symbol, provider_symbol, api_key)
+
+        # Only when Finnhub itself says the symbol has no metrics do one cautious
+        # symbol lookup. This repairs exchange-code mismatches without turning every
+        # refresh into multiple API calls.
+        if row.get("provider_error") == "Keine Basic-Financials für Symbol":
+            time.sleep(max(0.0, float(delay_seconds)))
+            query = str(getattr(rec, "name", "") or symbol)
+            alt_symbol, lookup_error = resolve_finnhub_symbol(
+                query=query,
+                api_key=api_key,
+                preferred_symbol=provider_symbol,
+                original_symbol=symbol,
+            )
+            if lookup_error == "RATE_LIMIT":
+                row["provider_error"] = "RATE_LIMIT"
+            elif alt_symbol and alt_symbol != provider_symbol:
+                time.sleep(max(0.0, float(delay_seconds)))
+                alt = fetch_finnhub_basic(symbol, alt_symbol, api_key)
+                alt["resolved_provider_symbol"] = alt_symbol
+                alt["provider_symbol_original"] = provider_symbol
+                row = alt
+
         rows.append(row)
         if row.get("provider_error") == "RATE_LIMIT":
             # Stop instead of hammering the free endpoint. Existing rows are preserved.

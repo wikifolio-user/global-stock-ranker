@@ -36,10 +36,10 @@ ProgressCallback = Callable[[float, str, str], None]
 
 @dataclass(frozen=True)
 class RefreshPolicy:
-    price_limit: int = 250
-    finnhub_limit: int = 150
-    finnhub_batch: int = 50
-    max_runtime_seconds: int = 240
+    price_limit: int = 500
+    finnhub_limit: int = 240
+    finnhub_batch: int = 40
+    max_runtime_seconds: int = 300
     refresh_universe: bool = True
     refresh_prices: bool = True
     refresh_sec: bool = True
@@ -69,6 +69,58 @@ def _emit(cb: ProgressCallback | None, progress: float, stage: str, detail: str)
         cb(max(0.0, min(1.0, float(progress))), stage, detail)
 
 
+def _load_all(paths: Mapping[str, Path]):
+    return (
+        load_universe_cache(paths["universe"]),
+        load_cache(paths["sec"]),
+        load_cache(paths["finnhub"]),
+        load_cache(paths["yahoo"]),
+        load_cache(paths["prices"]),
+    )
+
+
+def refresh_plan(paths: Mapping[str, Path]) -> dict[str, int | bool | str]:
+    """Inspect local cache and report what is actually due without network traffic."""
+    universe, sec_cache, finnhub_cache, _, price_cache = _load_all(paths)
+    if universe.empty:
+        return {
+            "universe_rows": 0,
+            "universe_due": True,
+            "prices_due": 0,
+            "sec_due": True,
+            "finnhub_due": 0,
+            "finnhub_cached": int(len(finnhub_cache)),
+            "price_cached": int(len(price_cache)),
+        }
+
+    price_due = select_stale_symbols(
+        universe,
+        price_cache,
+        timestamp_col="price_updated_at",
+        max_age_hours=PRICE_REFRESH_HOURS,
+        limit=len(universe),
+        failure_cooldown_hours=PRICE_FAILURE_COOLDOWN_HOURS,
+        non_us_first=False,
+    )
+    finn_due = select_next_symbols(
+        universe,
+        finnhub_cache,
+        limit=len(universe),
+        non_us_first=True,
+        retry_after_days=7,
+        refresh_after_days=FINNHUB_REFRESH_DAYS,
+    )
+    return {
+        "universe_rows": int(len(universe)),
+        "universe_due": bool(frame_is_stale(universe, "universe_updated_at", UNIVERSE_CACHE_HOURS)),
+        "prices_due": int(len(price_due)),
+        "sec_due": bool(frame_is_stale(sec_cache, "fundamental_updated_at", SEC_CACHE_DAYS * 24)),
+        "finnhub_due": int(len(finn_due)),
+        "finnhub_cached": int(len(finnhub_cache)),
+        "price_cached": int(len(price_cache)),
+    }
+
+
 def run_refresh_cycle(
     paths: Mapping[str, Path],
     finnhub_key: str,
@@ -76,32 +128,32 @@ def run_refresh_cycle(
     policy: RefreshPolicy,
     progress_cb: ProgressCallback | None = None,
 ) -> dict[str, object]:
-    """Run a smart refresh cycle that only requests missing or stale data.
+    """Run one resumable smart refresh cycle.
 
-    The function is shared by the Streamlit one-button updater and the scheduled
-    GitHub Actions data agent. It preserves cached values and stops gracefully on
-    provider limits or runtime budget exhaustion.
+    Fresh rows are never downloaded just because the button was pressed again. The
+    function advances through queues, stores every completed attempt, respects
+    provider cooldowns, and can therefore be called repeatedly or by GitHub Actions
+    without starting over.
     """
     started = time.monotonic()
     messages: list[tuple[str, str]] = []
     counters = {
         "universe_updated": 0,
-        "prices_attempted": 0,
+        "prices_requested": 0,
+        "prices_responses": 0,
         "prices_useful": 0,
         "sec_rows": 0,
-        "finnhub_attempted": 0,
+        "finnhub_requested": 0,
+        "finnhub_responses": 0,
         "finnhub_useful": 0,
+        "finnhub_errors": 0,
         "rate_limited": 0,
     }
 
-    universe = load_universe_cache(paths["universe"])
-    sec_cache = load_cache(paths["sec"])
-    finnhub_cache = load_cache(paths["finnhub"])
-    yahoo_cache = load_cache(paths["yahoo"])
-    price_cache = load_cache(paths["prices"])
+    universe, sec_cache, finnhub_cache, yahoo_cache, price_cache = _load_all(paths)
 
-    # 1) Universe: only if missing or stale.
-    _emit(progress_cb, 0.03, "Universum", "Prüfe, ob das Aktienuniversum aktuell ist …")
+    # 1) Universe
+    _emit(progress_cb, 0.02, "Universum", "Prüfe Fälligkeit …")
     universe_stale = frame_is_stale(universe, "universe_updated_at", UNIVERSE_CACHE_HOURS)
     if policy.refresh_universe and (universe.empty or universe_stale):
         try:
@@ -116,13 +168,13 @@ def run_refresh_cycle(
                 raise
             messages.append(("warning", f"Universum blieb im Cache: {exc}"))
     else:
-        messages.append(("info", "Universum ist noch aktuell – kein erneuter Download nötig."))
+        messages.append(("info", "Universum ist frisch – übersprungen."))
 
     if universe.empty:
         raise DataSourceError("Kein Aktienuniversum verfügbar.")
 
-    # 2) Prices/trend: refresh only stale/missing rows and respect recent failures.
-    _emit(progress_cb, 0.15, "Kurse & Trend", "Ermittle fehlende oder veraltete Kursdaten …")
+    # 2) Prices/trend
+    _emit(progress_cb, 0.12, "Kurse & Trend", "Suche nur fehlende/veraltete Kurse …")
     if policy.refresh_prices and policy.price_limit > 0:
         price_symbols = select_stale_symbols(
             universe,
@@ -133,26 +185,30 @@ def run_refresh_cycle(
             failure_cooldown_hours=PRICE_FAILURE_COOLDOWN_HOURS,
             non_us_first=False,
         )
+        counters["prices_requested"] = len(price_symbols)
         if price_symbols:
             fresh_prices = fetch_yahoo_price_snapshot(universe, symbols=price_symbols)
-            counters["prices_attempted"] = len(fresh_prices)
+            counters["prices_responses"] = len(fresh_prices)
             if not fresh_prices.empty:
-                useful = pd.to_numeric(fresh_prices.get("price", pd.Series(index=fresh_prices.index, dtype=float)), errors="coerce").notna()
+                useful = pd.to_numeric(
+                    fresh_prices.get("price", pd.Series(index=fresh_prices.index, dtype=float)),
+                    errors="coerce",
+                ).notna()
                 counters["prices_useful"] = int(useful.sum())
-                if fresh_prices.get("provider_error", pd.Series(dtype=object)).astype(str).eq("RATE_LIMIT").any():
+                errors = fresh_prices.get("provider_error", pd.Series("", index=fresh_prices.index)).fillna("").astype(str)
+                if errors.eq("RATE_LIMIT").any():
                     counters["rate_limited"] += 1
                 price_cache = upsert_cache(price_cache, fresh_prices)
                 save_cache(price_cache, paths["prices"])
             messages.append((
                 "success" if counters["prices_useful"] else "warning",
-                f"Kurse: {len(price_symbols)} fällig · {counters['prices_useful']} erfolgreich. "
-                "Bereits aktuelle Kurse wurden übersprungen.",
+                f"Kurse: {len(price_symbols)} fällig · {counters['prices_useful']} erfolgreich. Frische Kurse blieben im Cache.",
             ))
         else:
-            messages.append(("info", "Kurse & Trend sind innerhalb des Aktualisierungsfensters bereits aktuell."))
+            messages.append(("info", "Kurse & Trend sind bereits aktuell – 0 Downloads."))
 
-    # 3) SEC: bulk refresh only once per cache window.
-    _emit(progress_cb, 0.48, "SEC Fundamentals", "Prüfe offizielle US-Fundamentaldaten …")
+    # 3) SEC
+    _emit(progress_cb, 0.43, "SEC Fundamentals", "Prüfe offiziellen US-Cache …")
     sec_stale = frame_is_stale(sec_cache, "fundamental_updated_at", SEC_CACHE_DAYS * 24)
     if policy.refresh_sec and sec_stale:
         if sec_user_agent:
@@ -168,10 +224,10 @@ def run_refresh_cycle(
         else:
             messages.append(("warning", "SEC_USER_AGENT fehlt – vorhandene SEC-Daten bleiben erhalten."))
     else:
-        messages.append(("info", "SEC-Fundamentals sind noch aktuell – kein erneuter Bulk-Abruf nötig."))
+        messages.append(("info", "SEC-Fundamentals sind frisch – übersprungen."))
 
-    # 4) Finnhub: advance through the missing/stale queue until budget/limit is reached.
-    _emit(progress_cb, 0.67, "Internationale Fundamentals", "Arbeite die Finnhub-Warteschlange automatisch ab …")
+    # 4) Finnhub queue
+    _emit(progress_cb, 0.62, "Internationale Fundamentals", "Setze die offene Warteschlange fort …")
     if policy.refresh_finnhub and policy.finnhub_limit > 0:
         if not finnhub_key:
             messages.append(("warning", "FINNHUB_API_KEY fehlt – internationale Fundamentals wurden übersprungen."))
@@ -189,37 +245,44 @@ def run_refresh_cycle(
                 )
                 if not symbols:
                     break
+                counters["finnhub_requested"] += len(symbols)
                 fresh = enrich_finnhub_fundamentals(universe, symbols, finnhub_key)
                 stats = provider_batch_stats(fresh)
-                counters["finnhub_attempted"] += stats["responses"]
+                counters["finnhub_responses"] += stats["responses"]
                 counters["finnhub_useful"] += stats["useful"]
+                counters["finnhub_errors"] += stats["errors"]
                 counters["rate_limited"] += stats["rate_limits"]
                 if not fresh.empty:
                     finnhub_cache = upsert_cache(finnhub_cache, fresh)
                     save_cache(finnhub_cache, paths["finnhub"])
-                remaining -= max(1, stats["responses"])
+
+                # Count actual responses, because rate-limited batches can end early.
+                consumed = max(1, stats["responses"])
+                remaining -= consumed
                 done_fraction = 1.0 - (remaining / max(1, int(policy.finnhub_limit)))
                 _emit(
                     progress_cb,
-                    0.67 + 0.28 * done_fraction,
+                    0.62 + 0.34 * done_fraction,
                     "Internationale Fundamentals",
-                    f"Finnhub: {counters['finnhub_attempted']} geprüft · {counters['finnhub_useful']} nutzbar …",
+                    f"{counters['finnhub_responses']} geprüft · {counters['finnhub_useful']} breit nutzbar · {counters['finnhub_errors']} Fehler …",
                 )
                 if stats["rate_limits"] > 0:
-                    messages.append(("warning", "Finnhub-Rate-Limit erreicht. Der nächste Lauf setzt automatisch an dieser Stelle fort."))
+                    messages.append(("warning", "Finnhub-Rate-Limit erreicht. Der nächste Lauf setzt automatisch bei der nächsten fälligen Aktie fort."))
                     break
                 if stats["responses"] == 0:
                     break
-            if counters["finnhub_attempted"]:
+
+            if counters["finnhub_responses"]:
                 messages.append((
-                    "success" if counters["finnhub_useful"] else "warning",
-                    f"Finnhub: {counters['finnhub_attempted']} Antworten · {counters['finnhub_useful']} nutzbar. "
-                    "Bereits aktuelle/zuletzt fehlgeschlagene Aktien wurden automatisch übersprungen.",
+                    "success" if counters["finnhub_useful"] else "info",
+                    f"Finnhub: {counters['finnhub_responses']} Antworten · {counters['finnhub_useful']} mit breiter Kennzahlenabdeckung · "
+                    f"{counters['finnhub_errors']} Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen.",
                 ))
             else:
                 messages.append(("info", "Finnhub-Warteschlange enthält derzeit keine fälligen Aktien."))
 
-    _emit(progress_cb, 1.0, "Fertig", "Aktualisierung abgeschlossen. Ranking wird neu berechnet …")
+    final_plan = refresh_plan(paths)
+    _emit(progress_cb, 1.0, "Fertig", "Cache gespeichert; Ranking wird neu berechnet …")
     return {
         "universe": universe,
         "sec": sec_cache,
@@ -228,5 +291,6 @@ def run_refresh_cycle(
         "prices": price_cache,
         "messages": messages,
         "counters": counters,
+        "remaining": final_plan,
         "elapsed_seconds": round(time.monotonic() - started, 1),
     }

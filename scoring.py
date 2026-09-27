@@ -15,6 +15,12 @@ from settings import (
     DCF_GROWTH_FLOOR,
     DCF_TERMINAL_GROWTH,
     DCF_YEARS,
+    DEFAULT_MIN_COMPLETENESS,
+    DEFAULT_MIN_CONFIDENCE,
+    GLOBAL_LITE_MIN_COMPLETENESS,
+    GLOBAL_LITE_MIN_CONFIDENCE,
+    GLOBAL_LITE_MIN_GROUPS,
+    GLOBAL_LITE_RANKING_PENALTY,
 )
 
 
@@ -271,11 +277,36 @@ def add_scores(df: pd.DataFrame) -> pd.DataFrame:
     score_frame = pd.concat([_safe_col(out, c) for c in SCORE_INPUTS], axis=1)
     out["data_completeness"] = (score_frame.notna().sum(axis=1) / len(SCORE_INPUTS) * 100).round(0)
 
-    # A missing-data haircut reduces false precision while preserving the transparent 0-100 score.
+    # Two evidence tiers: Full uses the complete model, while Global Lite admits
+    # non-US companies with a smaller but broad-enough set of global metrics. Lite
+    # rows receive both an uncertainty haircut and an explicit ranking penalty.
     confidence = _safe_col(out, "data_confidence")
-    confidence_factor = (0.45 + 0.55 * (confidence.clip(0, 100) / 100.0)).fillna(0.45)
+    lite_conf = _safe_col(out, "global_lite_confidence")
+    lite_comp = _safe_col(out, "global_lite_completeness")
+    lite_groups = _safe_col(out, "global_lite_groups")
+    country = out.get("country", pd.Series("", index=out.index)).astype(str)
+
+    full_tier = (out["data_completeness"] >= DEFAULT_MIN_COMPLETENESS) & (confidence >= DEFAULT_MIN_CONFIDENCE)
+    lite_tier = (
+        ~country.eq("United States")
+        & ~full_tier
+        & (lite_comp >= GLOBAL_LITE_MIN_COMPLETENESS)
+        & (lite_conf >= GLOBAL_LITE_MIN_CONFIDENCE)
+        & (lite_groups >= GLOBAL_LITE_MIN_GROUPS)
+    )
+    out["data_tier"] = np.select(
+        [full_tier, lite_tier], ["Full", "Global Lite"], default="Unvollständig"
+    )
+    out["effective_data_confidence"] = np.where(lite_tier, lite_conf, confidence)
+    out["effective_data_completeness"] = np.where(lite_tier, lite_comp, out["data_completeness"])
+
+    effective_conf = pd.to_numeric(out["effective_data_confidence"], errors="coerce").fillna(0).clip(0, 100)
+    confidence_factor = 0.45 + 0.55 * (effective_conf / 100.0)
+    tier_factor = pd.Series(0.72, index=out.index, dtype=float)
+    tier_factor.loc[full_tier] = 1.0
+    tier_factor.loc[lite_tier] = float(GLOBAL_LITE_RANKING_PENALTY)
     out["score_confidence_adjusted"] = (out["score_total"] * confidence_factor).clip(0, 100)
-    out["ranking_score"] = out["score_confidence_adjusted"]
+    out["ranking_score"] = (out["score_confidence_adjusted"] * tier_factor).clip(0, 100)
 
     out = add_dcf_proxies(out)
     return out

@@ -7,7 +7,12 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from settings import SOURCE_QUALITY
+from settings import (
+    SOURCE_QUALITY,
+    GLOBAL_LITE_MIN_COMPLETENESS,
+    GLOBAL_LITE_MIN_CONFIDENCE,
+    GLOBAL_LITE_MIN_GROUPS,
+)
 
 
 FUNDAMENTAL_METRICS = [
@@ -49,6 +54,23 @@ AUX_FUNDAMENTALS = [
     "analystCount",
     "recommendationMean",
 ]
+
+GLOBAL_LITE_GROUPS = {
+    "quality": [
+        "returnOnInvestedCapitalTTM", "returnOnEquityTTM",
+        "grossProfitMarginTTM", "operatingProfitMarginTTM",
+    ],
+    "growth": ["revenueGrowth", "epsGrowth", "fcfGrowth"],
+    "cashflow": ["freeCashFlowYieldTTM", "fcfMarginTTM", "freeCashFlowPerShareTTM"],
+    "balance": ["netDebtToEBITDATTM", "currentRatioTTM", "interestCoverageRatioTTM"],
+    "valuation": [
+        "priceToEarningsRatioTTM", "enterpriseValueMultipleTTM",
+        "forwardPriceToEarningsGrowthRatioTTM",
+    ],
+}
+GLOBAL_LITE_METRICS = list(dict.fromkeys(
+    metric for metrics in GLOBAL_LITE_GROUPS.values() for metric in metrics
+))
 
 PRICE_METRICS = [
     "price",
@@ -146,14 +168,20 @@ def select_next_symbols(
             pc.get("fundamental_attempted_at", pc.get("fundamental_updated_at", pd.Series(index=pc.index, dtype=object))),
             errors="coerce", utc=True,
         )
+        errors = pc.get("provider_error", pd.Series("", index=pc.index)).fillna("").astype(str)
         now = pd.Timestamp.now(tz="UTC")
         fresh_cutoff = now - pd.Timedelta(days=max(0, int(refresh_after_days)))
-        useful_fresh = (pc["_coverage"] >= 5) & (success_at >= fresh_cutoff)
-        skip.update(pc.loc[useful_fresh, "symbol"].astype(str))
+
+        # Important: a successful but thin Finnhub response must also leave the queue.
+        # Older versions only skipped rows with >=5 metrics; 1-4-metric rows were
+        # fetched on every click and the queue could appear stuck forever. Any
+        # error-free response with at least one fundamental is now considered a
+        # completed provider attempt until the normal refresh window expires.
+        successful_fresh = errors.eq("") & (pc["_coverage"] >= 1) & (success_at >= fresh_cutoff)
+        skip.update(pc.loc[successful_fresh, "symbol"].astype(str))
 
         recent_cutoff = now - pd.Timedelta(days=max(0, int(retry_after_days)))
         recent_attempt = attempt_at >= recent_cutoff
-        errors = pc.get("provider_error", pd.Series("", index=pc.index)).fillna("").astype(str)
         failed_recently = recent_attempt & errors.ne("")
 
         same_mapping = pd.Series(True, index=pc.index)
@@ -335,6 +363,44 @@ def assemble_snapshot(
         labels=["Niedrig", "Mittel", "Hoch"],
     ).astype(str)
 
+    # Global-Lite evidence model. Free international providers often expose a
+    # useful but smaller subset than SEC. We therefore measure a dedicated,
+    # transparent subset across five evidence families instead of requiring every
+    # full-model input. The final ranking applies an explicit Lite penalty later.
+    lite_cols = [m for m in GLOBAL_LITE_METRICS if m in out.columns]
+    if lite_cols:
+        lite_frame = out[lite_cols].apply(pd.to_numeric, errors="coerce")
+        out["global_lite_completeness"] = (
+            lite_frame.notna().sum(axis=1) / len(GLOBAL_LITE_METRICS) * 100
+        ).round(0)
+    else:
+        out["global_lite_completeness"] = 0.0
+
+    group_count = pd.Series(0, index=out.index, dtype=int)
+    for metrics in GLOBAL_LITE_GROUPS.values():
+        available = [m for m in metrics if m in out.columns]
+        if available:
+            group_count += out[available].apply(pd.to_numeric, errors="coerce").notna().any(axis=1).astype(int)
+    out["global_lite_groups"] = group_count
+
+    lite_quality_weights = []
+    for idx, row in out.iterrows():
+        weights = []
+        for metric in GLOBAL_LITE_METRICS:
+            src = str(row.get(f"source__{metric}", ""))
+            if src:
+                weights.append(SOURCE_QUALITY.get(src, 0.5))
+        lite_quality_weights.append(float(np.mean(weights)) if weights else 0.0)
+    lite_quality = pd.Series(lite_quality_weights, index=out.index, dtype=float)
+    lite_price = pd.to_numeric(out["price"], errors="coerce").notna().astype(float)
+    breadth = (out["global_lite_groups"] / max(1, len(GLOBAL_LITE_GROUPS))).clip(0, 1)
+    out["global_lite_confidence"] = (
+        0.65 * pd.to_numeric(out["global_lite_completeness"], errors="coerce").fillna(0)
+        + 20 * lite_quality
+        + 10 * lite_price
+        + 5 * breadth
+    ).clip(0, 100).round(0)
+
     # Provider coverage flags for diagnostics.
     for source, provider in providers.items():
         covered = set(provider.index.astype(str)) if not provider.empty else set()
@@ -347,49 +413,88 @@ def assemble_snapshot(
     return out.reset_index()
 
 
-def coverage_summary(
+def eligibility_masks(
     snapshot: pd.DataFrame,
-    min_completeness: float = 58,
-    min_confidence: float = 62,
-) -> dict[str, float | int | str]:
-    """Coverage using the same eligibility rule as the visible ranking.
+    min_completeness: float = 55,
+    min_confidence: float = 60,
+    allow_global_lite: bool = True,
+    lite_min_completeness: float = GLOBAL_LITE_MIN_COMPLETENESS,
+    lite_min_confidence: float = GLOBAL_LITE_MIN_CONFIDENCE,
+    lite_min_groups: int = GLOBAL_LITE_MIN_GROUPS,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Return overall/full/global-lite ranking eligibility masks.
 
-    Older versions used confidence alone for the KPI while the Top-100 also required
-    completeness. That made the headline coverage disagree with what users could
-    actually see. Version 3.1 aligns both definitions.
+    Global Lite is deliberately limited to non-US securities and requires evidence
+    from several distinct fundamental families. This prevents sparse single-ratio
+    rows from entering the global ranking merely because a provider returned data.
     """
     if snapshot is None or snapshot.empty:
+        empty = pd.Series(dtype=bool)
+        return empty, empty, empty
+
+    idx = snapshot.index
+    conf = pd.to_numeric(snapshot.get("data_confidence", pd.Series(0, index=idx)), errors="coerce").fillna(0)
+    completeness_col = "data_completeness" if "data_completeness" in snapshot.columns else "raw_data_completeness"
+    completeness = pd.to_numeric(snapshot.get(completeness_col, pd.Series(0, index=idx)), errors="coerce").fillna(0)
+    full = (conf >= float(min_confidence)) & (completeness >= float(min_completeness))
+
+    country = snapshot.get("country", pd.Series("", index=idx)).astype(str)
+    lite_comp = pd.to_numeric(snapshot.get("global_lite_completeness", pd.Series(0, index=idx)), errors="coerce").fillna(0)
+    lite_conf = pd.to_numeric(snapshot.get("global_lite_confidence", pd.Series(0, index=idx)), errors="coerce").fillna(0)
+    lite_groups = pd.to_numeric(snapshot.get("global_lite_groups", pd.Series(0, index=idx)), errors="coerce").fillna(0)
+    lite = (
+        bool(allow_global_lite)
+        & ~country.eq("United States")
+        & ~full
+        & (lite_comp >= float(lite_min_completeness))
+        & (lite_conf >= float(lite_min_confidence))
+        & (lite_groups >= int(lite_min_groups))
+    )
+    overall = full | lite
+    return overall.astype(bool), full.astype(bool), lite.astype(bool)
+
+
+def coverage_summary(
+    snapshot: pd.DataFrame,
+    min_completeness: float = 55,
+    min_confidence: float = 60,
+    allow_global_lite: bool = True,
+) -> dict[str, float | int | str]:
+    """Coverage using the same Full + Global-Lite eligibility rule as the ranking."""
+    if snapshot is None or snapshot.empty:
         return {
-            "universe": 0, "eligible": 0, "non_us_eligible": 0,
-            "coverage_pct": 0.0, "non_us_coverage_pct": 0.0,
+            "universe": 0, "eligible": 0, "full_eligible": 0, "lite_eligible": 0,
+            "non_us_eligible": 0, "coverage_pct": 0.0, "non_us_coverage_pct": 0.0,
             "status": "Keine Daten",
         }
-    conf = pd.to_numeric(
-        snapshot.get("data_confidence", pd.Series(0, index=snapshot.index)), errors="coerce"
-    ).fillna(0)
-    completeness_col = "data_completeness" if "data_completeness" in snapshot.columns else "raw_data_completeness"
-    completeness = pd.to_numeric(
-        snapshot.get(completeness_col, pd.Series(0, index=snapshot.index)), errors="coerce"
-    ).fillna(0)
-    eligible_mask = (conf >= float(min_confidence)) & (completeness >= float(min_completeness))
 
+    eligible_mask, full_mask, lite_mask = eligibility_masks(
+        snapshot,
+        min_completeness=min_completeness,
+        min_confidence=min_confidence,
+        allow_global_lite=allow_global_lite,
+    )
     country = snapshot.get("country", pd.Series("", index=snapshot.index)).astype(str)
     n = len(snapshot)
     eligible = int(eligible_mask.sum())
+    full_eligible = int(full_mask.sum())
+    lite_eligible = int(lite_mask.sum())
     non_us = ~country.eq("United States")
     non_us_total = int(non_us.sum())
     non_us_eligible = int((eligible_mask & non_us).sum())
     ratio = eligible / n if n else 0
     non_us_ratio = non_us_eligible / non_us_total if non_us_total else 0
-    if ratio >= 0.85 and non_us_ratio >= 0.75:
+    if ratio >= 0.80 and non_us_ratio >= 0.70:
         status = "Global belastbar"
-    elif ratio >= 0.55 and non_us_ratio >= 0.40:
+    elif ratio >= 0.45 and non_us_ratio >= 0.30:
         status = "Fortgeschritten / noch unvollständig"
     else:
         status = "Vorläufig"
     return {
         "universe": n,
         "eligible": eligible,
+        "full_eligible": full_eligible,
+        "lite_eligible": lite_eligible,
         "non_us_eligible": non_us_eligible,
         "coverage_pct": round(ratio * 100, 1),
         "non_us_coverage_pct": round(non_us_ratio * 100, 1),

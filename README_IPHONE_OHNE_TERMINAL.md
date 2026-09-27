@@ -1,8 +1,20 @@
-# Global Stock Ranker 3.3 – kostenlos, weltweit, ohne Terminal
+# Global Stock Ranker 3.4 – kostenlos, weltweit, ohne Terminal
 
 Diese Version ersetzt FMP vollständig. Sie kombiniert mehrere kostenlose Quellen und ist so aufgebaut, dass du die Dateien direkt auf dem iPhone in GitHub anlegen oder ersetzen kannst.
 
 
+
+
+## Neu in Version 3.4
+
+- **Ein Button statt vieler Schritte:** `🔄 Alles intelligent aktualisieren` setzt automatisch die fälligen Queues fort.
+- Bereits frische Daten werden **nicht erneut geladen**.
+- Die Sidebar zeigt die noch offene Kurs- und Finnhub-Queue.
+- Internationale Aktien können als klar gekennzeichnetes **Global Lite** ins Ranking kommen, wenn kostenlose Quellen ausreichend breite, aber nicht vollständige Daten liefern.
+- Global Lite bekommt einen deutlichen Ranking-Abschlag; Full und Lite werden nicht gleich behandelt.
+- Dünne erfolgreiche Finnhub-Antworten werden 14 Tage gecacht statt bei jedem Klick wiederholt.
+- Der GitHub-Hintergrundagent persistiert den Datenbestand unter `data_cache/`.
+- Falls der iPhone-Upload den versteckten `.github`-Ordner auslässt, steht der Workflow zusätzlich sichtbar als `STOCK_DATA_AGENT_WORKFLOW.yml` bereit. Anleitung: `INSTALL_AGENT_IPHONE.md`.
 
 ## Neu in Version 3.2
 
@@ -47,9 +59,14 @@ Lege alle folgenden Dateien im Hauptordner deines Repositorys ab:
 - `signals.py`
 - `history.py`
 - `demo.py`
+- `persistence.py`
+- `refresh_engine.py`
+- `agent_refresh.py`
 - `requirements.txt`
+- `.github/workflows/stock-data-agent.yml`
+- `data_cache/.gitkeep`
 
-Die README und CHANGELOG sind optional.
+Die README/CHANGELOG sind optional, für das iPhone-Setup sind `INSTALL_AGENT_IPHONE.md` und `STOCK_DATA_AGENT_WORKFLOW.yml` hilfreich.
 
 ## iPhone: Dateien ohne Terminal in GitHub anlegen
 
@@ -74,7 +91,7 @@ FINNHUB_API_KEY = "DEIN_KOSTENLOSER_FINNHUB_KEY"
 SEC_USER_AGENT = "Vorname Nachname deine@email.de"
 ```
 
-`FINNHUB_API_KEY` ist kostenlos, aber optional. Ohne ihn kann Yahoo als Fallback verwendet werden.
+`FINNHUB_API_KEY` ist für internationale Fundamentals empfohlen. Yahoo-Fundamentals werden wegen der Cloud-401/Crumb-Probleme nicht mehr live als Fundamentals-Fallback verwendet; Yahoo liefert nur Kurs-/Trenddaten über den Chart-Endpunkt.
 
 `SEC_USER_AGENT` ist kein Schlüssel. Die SEC erwartet bei automatisierten Abrufen einen identifizierbaren User-Agent mit Kontaktmöglichkeit. Er wird nur beim Abruf von SEC-Daten als HTTP-Header verwendet.
 
