@@ -1,10 +1,10 @@
-"""Zentrale Konfiguration des Global Stock Ranker 3.3.
+"""Zentrale Konfiguration des Global Stock Ranker 3.3.2.
 
 Die Datei ist bewusst einfach gehalten. Die meisten persönlichen Anpassungen können
 hier vorgenommen werden, ohne die Daten- oder UI-Logik anzufassen.
 """
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.3.2"
 
 # -------------------------
 # Universum / Ranking

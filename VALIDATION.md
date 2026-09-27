@@ -7,3 +7,5 @@
 - Finnhub successful rows have a success timestamp; provider failures use a separate attempt timestamp.
 - GitHub Actions agent uses the same refresh engine as the Streamlit app and persists compressed cache files under `data_cache/`.
 - Live third-party endpoints are not exercised by the offline test suite; runtime diagnostics remain visible in the app.
+
+- Regression: leerer/alter Kurs-Cache mit naiven Zeitstempeln wird UTC-sicher verglichen.

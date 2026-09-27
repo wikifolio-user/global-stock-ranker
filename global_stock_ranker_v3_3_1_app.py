@@ -69,7 +69,7 @@ PERSISTED_RESTORED = bootstrap_local_cache(PATHS, "data_cache")
 AGENT_STATUS_PATH = Path("data_cache/agent_status.json")
 
 st.set_page_config(
-    page_title="Global Stock Ranker 3.3.2",
+    page_title="Global Stock Ranker 3.3.1",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -202,7 +202,7 @@ def load_live_caches():
     )
 
 
-st.title("📈 Global Stock Ranker 3.3.2")
+st.title("📈 Global Stock Ranker 3.3.1")
 st.caption(
     "Kostenloses Multi-Source-Research · intelligenter Cache · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo Chart · "
     "Qualität, Wachstum, FCF, Bilanz, Bewertung, DCF-Proxy, Trend und Veränderungshistorie."

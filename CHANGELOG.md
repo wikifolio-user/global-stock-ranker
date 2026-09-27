@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.3.2 – UTC-Zeitvergleich im Smart Update
+
+- Fehler `Invalid comparison between dtype=datetime64[ns] and Timestamp` behoben.
+- Leere Kurs-Caches erzeugen jetzt explizit UTC-aware Zeitspalten.
+- Alte/naive Cache-Zeitstempel werden vor dem Fälligkeitsvergleich robust nach UTC normalisiert.
+- Der Ein-Klick-Updater funktioniert damit auch nach frischem Deploy bzw. leerem Kurs-Cache.
+
+## 3.3.1 – Mobile Header Fix
+
+- Behebt die abgeschnittene Hauptüberschrift auf iPhone/mobile Safari.
+- Entfernt die zu aggressive mobile Top-Padding-Überschreibung und reserviert Platz für die Streamlit-Toolbar.
+- Passt Zeilenhöhe und oberen Abstand der H1-Überschrift für kleine Displays an.
+
 ## 3.3 – One-click Update & Background Data Agent
 
 - New **Alles intelligent aktualisieren** button with automatic sequence and progress display.

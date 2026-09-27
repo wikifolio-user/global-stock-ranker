@@ -193,7 +193,10 @@ def select_stale_symbols(
     now = pd.Timestamp.now(tz="UTC")
 
     if cache is None or cache.empty or "symbol" not in cache.columns:
-        work["_ts"] = pd.NaT
+        # Keep timestamps timezone-aware even when the cache is empty. A plain
+        # ``pd.NaT`` column becomes dtype=datetime64[ns] (tz-naive) and cannot be
+        # compared with the UTC-aware cutoff used below.
+        work["_ts"] = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns, UTC]")
         work["_failed_recently"] = False
     else:
         c = cache.drop_duplicates("symbol", keep="last").copy()
@@ -206,6 +209,9 @@ def select_stale_symbols(
         work = work.merge(c[["symbol", "_ts", "_failed_recently"]], on="symbol", how="left")
         work["_failed_recently"] = work["_failed_recently"].eq(True)
 
+    # Normalize again after merge so old cache files with naive timestamps cannot
+    # trigger ``Invalid comparison between dtype=datetime64[ns] and Timestamp``.
+    work["_ts"] = pd.to_datetime(work["_ts"], errors="coerce", utc=True)
     cutoff = now - pd.Timedelta(hours=float(max_age_hours))
     due = work["_ts"].isna() | (work["_ts"] < cutoff)
     work = work[due & ~work["_failed_recently"]].copy()
