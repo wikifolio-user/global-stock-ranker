@@ -53,3 +53,68 @@ def test_scoring_and_signals_bounds():
     assert 0 <= signaled.loc[0, "thesis_risk_score"] <= 100
     assert "trend" in signaled.columns
     assert "exit_watch" in signaled.columns
+
+
+def test_international_symbol_mapping_regressions():
+    # London trailing-dot bug from live logs.
+    assert to_provider_symbol("BP.", "London Stock Exchange", "United Kingdom") == "BP.L"
+    assert to_provider_symbol("RR.", "London Stock Exchange", "United Kingdom") == "RR.L"
+    assert to_provider_symbol("BA.", "London Stock Exchange", "United Kingdom") == "BA.L"
+
+    # Country fallbacks cover common iShares exchange-label variations.
+    assert to_provider_symbol("CBA", "ASX - All Markets", "Australia") == "CBA.AX"
+    assert to_provider_symbol("BNP", "Euronext - Paris", "France") == "BNP.PA"
+    assert to_provider_symbol("NOVO-B", "Nasdaq Copenhagen", "Denmark") == "NOVO-B.CO"
+    assert to_provider_symbol("VOLV-B", "Nasdaq Stockholm", "Sweden") == "VOLV-B.ST"
+    assert to_provider_symbol("NDA-FI", "Nasdaq Helsinki", "Finland") == "NDA-FI.HE"
+    assert to_provider_symbol("PETR4", "B3 - Brasil Bolsa Balcao", "Brazil") == "PETR4.SA"
+
+
+def test_failed_provider_rows_get_cooldown():
+    from pipeline import select_next_symbols
+
+    universe = pd.DataFrame({
+        "symbol": ["AAA", "BBB", "CCC"],
+        "country": ["France", "France", "France"],
+        "ishares_weight_pct": [3.0, 2.0, 1.0],
+    })
+    cache = pd.DataFrame({
+        "symbol": ["AAA"],
+        "provider_error": ["HTTP 404"],
+        "fundamental_updated_at": [pd.Timestamp.now(tz="UTC").isoformat()],
+    })
+    selected = select_next_symbols(universe, cache, 2, retry_after_days=7)
+    assert selected == ["BBB", "CCC"]
+
+
+def test_coverage_matches_ranking_thresholds():
+    from pipeline import coverage_summary
+
+    frame = pd.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "country": ["United States", "France", "France"],
+        "data_confidence": [80, 80, 59],
+        "data_completeness": [70, 40, 90],
+    })
+    summary = coverage_summary(frame, min_completeness=55, min_confidence=60)
+    assert summary["eligible"] == 1
+    assert summary["non_us_eligible"] == 0
+
+
+def test_mapping_change_bypasses_failure_cooldown():
+    from pipeline import select_next_symbols
+
+    universe = pd.DataFrame({
+        "symbol": ["BP.", "AAA"],
+        "provider_symbol": ["BP.L", "AAA.PA"],
+        "country": ["United Kingdom", "France"],
+        "ishares_weight_pct": [2.0, 1.0],
+    })
+    cache = pd.DataFrame({
+        "symbol": ["BP."],
+        "provider_symbol": ["BP..L"],
+        "provider_error": ["HTTP 404"],
+        "fundamental_updated_at": [pd.Timestamp.now(tz="UTC").isoformat()],
+    })
+    selected = select_next_symbols(universe, cache, 1, retry_after_days=7)
+    assert selected == ["BP."]
