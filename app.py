@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import zipfile
 from datetime import datetime
@@ -19,6 +20,8 @@ from data_sources import (
 )
 from demo import make_demo_universe
 from history import add_history_deltas, append_snapshot, load_history, merge_imported_history, symbol_history
+from persistence import bootstrap_local_cache
+from refresh_engine import RefreshPolicy, run_refresh_cycle
 from pipeline import (
     FUNDAMENTAL_METRICS,
     assemble_snapshot,
@@ -60,8 +63,13 @@ PATHS = {
     "history": CACHE_DIR / "ranking_history.csv.gz",
 }
 
+# Restore durable repository cache after Streamlit redeploys/reboots. Existing local
+# files are kept, so interactive updates in the current process are never overwritten.
+PERSISTED_RESTORED = bootstrap_local_cache(PATHS, "data_cache")
+AGENT_STATUS_PATH = Path("data_cache/agent_status.json")
+
 st.set_page_config(
-    page_title="Global Stock Ranker 3.2",
+    page_title="Global Stock Ranker 3.3",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -184,9 +192,9 @@ def load_live_caches():
     )
 
 
-st.title("📈 Global Stock Ranker 3.2")
+st.title("📈 Global Stock Ranker 3.3")
 st.caption(
-    "Kostenloses Multi-Source-Research · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo Chart · "
+    "Kostenloses Multi-Source-Research · intelligenter Cache · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo Chart · "
     "Qualität, Wachstum, FCF, Bilanz, Bewertung, DCF-Proxy, Trend und Veränderungshistorie."
 )
 
@@ -220,20 +228,36 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Aktualisieren")
-    refresh_universe = st.button("1 · Weltuniversum aktualisieren", width="stretch")
-    price_scope = st.selectbox("Kursuniversum", ["Top 250", "Top 500", "Top 1000", "Global (~2.200)"], index=1)
-    refresh_prices = st.button("2 · Kurs & Trend aktualisieren", width="stretch")
-    refresh_sec = st.button("3 · SEC-US-Fundamentals aktualisieren", width="stretch")
+    st.subheader("Automatische Aktualisierung")
+    auto_refresh = st.button("🔄 Alles intelligent aktualisieren", type="primary", width="stretch")
+    st.caption(
+        "Ein Klick prüft zuerst, was bereits aktuell ist. Nur fehlende oder veraltete "
+        "Daten werden geladen: Universum → Kurse/Trend → SEC → Finnhub. "
+        "Provider-Limits werden automatisch berücksichtigt."
+    )
 
-    st.caption("Internationale Fundamentals: **Finnhub**. Yahoo-Fundamentals sind in 3.2 wegen Cloud-401/Crumb-Fehlern deaktiviert.")
-    enrich_source = "Finnhub (empfohlen)"
-    enrich_batch = st.selectbox("Aktien pro Lauf", [50, 100, 250, 500], index=1)
-    enrich_fundamentals = st.button("4 · Fehlende Fundamentals ergänzen", width="stretch")
+    if AGENT_STATUS_PATH.exists():
+        try:
+            agent_status = json.loads(AGENT_STATUS_PATH.read_text(encoding="utf-8"))
+            finished = str(agent_status.get("finished_at", ""))[:16].replace("T", " ")
+            cov = (agent_status.get("coverage") or {}).get("coverage_pct")
+            if finished:
+                suffix = f" · Ranking-Abdeckung {cov}%" if cov is not None else ""
+                st.caption(f"🤖 Hintergrund-Agent zuletzt: {finished} UTC{suffix}")
+        except Exception:
+            pass
+
+    with st.expander("Erweiterte manuelle Aktualisierung"):
+        refresh_universe = st.button("Weltuniversum erzwingen", width="stretch")
+        price_scope = st.selectbox("Kursuniversum", ["Top 250", "Top 500", "Top 1000", "Global (~2.200)"], index=1)
+        refresh_prices = st.button("Kurs & Trend erzwingen", width="stretch")
+        refresh_sec = st.button("SEC-US-Fundamentals erzwingen", width="stretch")
+        enrich_batch = st.selectbox("Finnhub-Aktien pro Lauf", [50, 100, 250, 500], index=1)
+        enrich_fundamentals = st.button("Finnhub-Warteschlange fortsetzen", width="stretch")
 
     st.caption(
-        "Der globale kostenlose Datensatz wird schrittweise aufgebaut und lokal gecacht. "
-        "Je höher die Abdeckung, desto belastbarer ist die weltweite Top-100-Liste."
+        "Der Cache bleibt bei normalen App-Neuladungen erhalten. Version 3.3 kann zusätzlich "
+        "einen GitHub-Actions-Datenagenten nutzen, der den dauerhaften data_cache automatisch pflegt."
     )
 
 # ---------------------------------------------------------------------------
@@ -250,35 +274,77 @@ if mode == "Demo":
 else:
     universe, sec_cache, finnhub_cache, yahoo_cache, price_cache = load_live_caches()
 
-    if universe.empty or refresh_universe:
+    if auto_refresh:
+        progress_bar = st.progress(0.0, text="Intelligente Aktualisierung wird vorbereitet …")
+        def _progress(value: float, stage: str, detail: str) -> None:
+            progress_bar.progress(value, text=f"{stage}: {detail}")
         try:
-            with st.spinner("Offizielles iShares-ACWI-Universum wird geladen …"):
+            result = run_refresh_cycle(
+                PATHS,
+                finnhub_key=finnhub_key,
+                sec_user_agent=sec_user_agent,
+                policy=RefreshPolicy(
+                    price_limit=500,
+                    finnhub_limit=200,
+                    finnhub_batch=50,
+                    max_runtime_seconds=300,
+                ),
+                progress_cb=_progress,
+            )
+            universe = result["universe"]
+            sec_cache = result["sec"]
+            finnhub_cache = result["finnhub"]
+            yahoo_cache = result["yahoo"]
+            price_cache = result["prices"]
+            operation_messages.extend(result["messages"])
+            counters = result.get("counters", {})
+            data_updated = any(int(v or 0) > 0 for v in counters.values())
+            progress_bar.progress(1.0, text=f"Fertig in {result.get('elapsed_seconds', 0)} Sekunden.")
+        except Exception as exc:
+            progress_bar.empty()
+            operation_messages.append(("error", f"Automatische Aktualisierung: {exc}"))
+
+    # First-ever start still obtains the universe automatically, so the app is usable
+    # before the user presses the one-click updater.
+    if universe.empty:
+        try:
+            with st.spinner("Offizielles iShares-ACWI-Universum wird einmalig geladen …"):
+                universe = fetch_acwi_universe()
+                save_universe(universe, PATHS["universe"])
+            operation_messages.append(("success", f"Universum initialisiert: {len(universe):,} Aktien.".replace(",", ".")))
+            data_updated = True
+        except Exception as exc:
+            st.error(str(exc))
+            st.info("Falls der Abruf temporär blockiert ist, später erneut versuchen oder den Demo-Modus verwenden.")
+            st.stop()
+
+    # Optional expert controls. They intentionally remain hidden in an expander.
+    if refresh_universe and not auto_refresh:
+        try:
+            with st.spinner("Weltuniversum wird erzwungen aktualisiert …"):
                 universe = fetch_acwi_universe()
                 save_universe(universe, PATHS["universe"])
             operation_messages.append(("success", f"Universum aktualisiert: {len(universe):,} Aktien.".replace(",", ".")))
             data_updated = True
         except Exception as exc:
-            if universe.empty:
-                st.error(str(exc))
-                st.info("Falls der Abruf temporär blockiert ist, später erneut versuchen oder den Demo-Modus verwenden.")
-                st.stop()
             operation_messages.append(("warning", f"Universum blieb im Cache: {exc}"))
 
-    if refresh_prices and not universe.empty:
+    if refresh_prices and not auto_refresh and not universe.empty:
         try:
             scope = weighted_universe_slice(universe, price_scope)
-            with st.spinner(f"Kurs- und Trenddaten für {len(scope):,} Aktien werden geladen …".replace(",", ".")):
+            with st.spinner(f"Kurs- und Trenddaten für {len(scope):,} Aktien werden erzwungen …".replace(",", ".")):
                 fresh_prices = fetch_yahoo_price_snapshot(scope)
                 price_cache = upsert_cache(price_cache, fresh_prices)
                 save_cache(price_cache, PATHS["prices"])
-            operation_messages.append(("success", f"Kursdaten aktualisiert: {len(fresh_prices):,} Aktien.".replace(",", ".")))
+            useful = int(pd.to_numeric(fresh_prices.get("price", pd.Series(index=fresh_prices.index, dtype=float)), errors="coerce").notna().sum()) if not fresh_prices.empty else 0
+            operation_messages.append(("success" if useful else "warning", f"Kursdaten: {useful} erfolgreich aktualisiert."))
             data_updated = True
         except Exception as exc:
             operation_messages.append(("error", f"Yahoo-Chart-Kursabruf: {exc}"))
 
-    if refresh_sec and not universe.empty:
+    if refresh_sec and not auto_refresh and not universe.empty:
         try:
-            with st.spinner("SEC-XBRL-Bulkdaten werden berechnet …"):
+            with st.spinner("SEC-XBRL-Bulkdaten werden erzwungen aktualisiert …"):
                 fresh_sec = fetch_sec_bulk_snapshot(universe, sec_user_agent)
                 sec_cache = upsert_cache(sec_cache, fresh_sec)
                 save_cache(sec_cache, PATHS["sec"])
@@ -287,12 +353,12 @@ else:
         except Exception as exc:
             operation_messages.append(("error", f"SEC-Abruf: {exc}"))
 
-    if enrich_fundamentals and not universe.empty:
+    if enrich_fundamentals and not auto_refresh and not universe.empty:
         try:
             if not finnhub_key:
                 raise DataSourceError("Für Finnhub bitte den kostenlosen FINNHUB_API_KEY eintragen.")
-            symbols = select_next_symbols(universe, finnhub_cache, int(enrich_batch), non_us_first=True)
-            with st.spinner(f"Finnhub ergänzt bis zu {len(symbols)} Aktien …"):
+            symbols = select_next_symbols(universe, finnhub_cache, int(enrich_batch), non_us_first=True, refresh_after_days=14)
+            with st.spinner(f"Finnhub arbeitet {len(symbols)} fällige Aktien ab …"):
                 fresh = enrich_finnhub_fundamentals(universe, symbols, finnhub_key)
             finnhub_cache = upsert_cache(finnhub_cache, fresh)
             save_cache(finnhub_cache, PATHS["finnhub"])
@@ -300,8 +366,7 @@ else:
             kind = "success" if stats["useful"] > 0 else "warning"
             operation_messages.append((kind,
                 f"Finnhub: {stats['responses']} Antworten · {stats['useful']} nutzbar · "
-                f"{stats['errors']} Fehler · {stats['rate_limits']} Rate-Limit. "
-                "Fehlversuche werden 7 Tage übersprungen, damit der nächste Lauf weiterkommt."
+                f"{stats['errors']} Fehler · {stats['rate_limits']} Rate-Limit."
             ))
             data_updated = True
         except Exception as exc:
@@ -593,7 +658,7 @@ with detail_tab:
 
         if mode == "Live kostenlos":
             st.caption(
-                "Yahoo-QuoteSummary/Statements werden in Version 3.2 nicht live abgerufen, "
+                "Yahoo-QuoteSummary/Statements werden in Version 3.3 nicht live abgerufen, "
                 "weil Streamlit-Cloud-IP-Adressen häufig 401/Invalid-Crumb erhalten. "
                 "Bereits gecachte Yahoo-Werte bleiben sichtbar, fließen aber nur als Fallback ein."
             )
@@ -618,7 +683,7 @@ with quality_tab:
             },
             {**provider_diagnostics(sec_cache, "SEC EDGAR"), "Rolle": "Offizielle US-XBRL-Fundamentals"},
             {**provider_diagnostics(finnhub_cache, "Finnhub"), "Rolle": "Globale Basic Financials / Ratios"},
-            {**provider_diagnostics(yahoo_cache, "Yahoo Fundamentals (Alt-Cache)"), "Rolle": "Nur vorhandener Cache; neue Live-Abrufe in 3.2 deaktiviert"},
+            {**provider_diagnostics(yahoo_cache, "Yahoo Fundamentals (Alt-Cache)"), "Rolle": "Nur vorhandener Cache; neue Live-Abrufe in 3.3 deaktiviert"},
             {
                 "Quelle": "Yahoo Chart Kurse",
                 "Cache-Zeilen": len(price_cache),
@@ -693,7 +758,7 @@ with method_tab:
     st.subheader("Methodik")
     st.markdown(
         """
-**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt. Yahoo dient in 3.2 nur noch über den crumb-freien v8-Chart-Endpunkt für Kurs- und Trenddaten; QuoteSummary-Fundamentals sind live deaktiviert.
+**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt. Yahoo dient in 3.3 nur noch über den crumb-freien v8-Chart-Endpunkt für Kurs- und Trenddaten; QuoteSummary-Fundamentals sind live deaktiviert.
 
 **100-Punkte-Modell.** Unternehmensqualität 20, Wachstum 15, Free Cashflow 15, Bilanz 10, Kapitalallokation 10, Moat-Proxy 10, Bewertung 15 und Risiko 5 Punkte. Harte Red Flags ziehen Punkte ab. Moat und Management werden ausdrücklich nur über quantitative Proxies angenähert.
 

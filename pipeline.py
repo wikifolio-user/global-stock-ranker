@@ -120,14 +120,13 @@ def select_next_symbols(
     limit: int,
     non_us_first: bool = True,
     retry_after_days: int = 7,
+    refresh_after_days: int = 14,
 ) -> list[str]:
-    """Select highest-weight securities not recently attempted by this provider.
+    """Select missing or stale fundamentals without repeatedly hammering failures.
 
-    Version 3.1 deliberately skips recent provider failures and low-coverage replies.
-    Without this cooldown, the same malformed/unsupported symbols can consume every
-    batch repeatedly and prevent the global dataset from progressing. Useful rows
-    (>=5 core metrics) remain covered indefinitely; recent attempts are retried only
-    after ``retry_after_days``.
+    Useful provider rows are kept until ``refresh_after_days`` old. Recent failures
+    receive a cooldown, while a changed provider-symbol mapping bypasses the cooldown
+    immediately. This lets the queue progress automatically and still refresh old data.
     """
     work = universe.copy()
     if "ishares_weight_pct" in work.columns:
@@ -139,39 +138,83 @@ def select_next_symbols(
     if provider_cache is not None and not provider_cache.empty and "symbol" in provider_cache.columns:
         pc = provider_cache.copy()
         pc["_coverage"] = _numeric_non_null_count(pc, FUNDAMENTAL_METRICS)
-        useful = pc["_coverage"] >= 5
-        skip.update(pc.loc[useful, "symbol"].astype(str))
+        success_at = pd.to_datetime(
+            pc.get("fundamental_updated_at", pd.Series(index=pc.index, dtype=object)),
+            errors="coerce", utc=True,
+        )
+        attempt_at = pd.to_datetime(
+            pc.get("fundamental_attempted_at", pc.get("fundamental_updated_at", pd.Series(index=pc.index, dtype=object))),
+            errors="coerce", utc=True,
+        )
+        now = pd.Timestamp.now(tz="UTC")
+        fresh_cutoff = now - pd.Timedelta(days=max(0, int(refresh_after_days)))
+        useful_fresh = (pc["_coverage"] >= 5) & (success_at >= fresh_cutoff)
+        skip.update(pc.loc[useful_fresh, "symbol"].astype(str))
 
-        # Any recent provider attempt (including 404/no-data/rate-limit responses) gets
-        # a cooldown. This prevents pathological retry loops while still allowing a
-        # future re-check if a provider adds coverage or a mapping is fixed.
-        if "fundamental_updated_at" in pc.columns and retry_after_days > 0:
-            attempted_at = pd.to_datetime(pc["fundamental_updated_at"], errors="coerce", utc=True)
-            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(retry_after_days))
-            recent = attempted_at >= cutoff
+        recent_cutoff = now - pd.Timedelta(days=max(0, int(retry_after_days)))
+        recent_attempt = attempt_at >= recent_cutoff
+        errors = pc.get("provider_error", pd.Series("", index=pc.index)).fillna("").astype(str)
+        failed_recently = recent_attempt & errors.ne("")
 
-            # A mapping change (e.g. BP..L -> BP.L) invalidates the cooldown so the
-            # corrected symbol is retried immediately after an app upgrade.
-            same_mapping = pd.Series(True, index=pc.index)
-            if "provider_symbol" in pc.columns and "provider_symbol" in universe.columns:
-                current_map = (
-                    universe[["symbol", "provider_symbol"]]
-                    .drop_duplicates("symbol", keep="last")
-                    .set_index("symbol")["provider_symbol"]
-                    .astype(str)
-                )
-                current_provider = pc["symbol"].astype(str).map(current_map).fillna("")
-                cached_provider = pc["provider_symbol"].fillna("").astype(str)
-                same_mapping = cached_provider.eq(current_provider)
-            skip.update(pc.loc[recent & same_mapping, "symbol"].astype(str))
+        same_mapping = pd.Series(True, index=pc.index)
+        if "provider_symbol" in pc.columns and "provider_symbol" in universe.columns:
+            current_map = (
+                universe[["symbol", "provider_symbol"]]
+                .drop_duplicates("symbol", keep="last")
+                .set_index("symbol")["provider_symbol"]
+                .astype(str)
+            )
+            current_provider = pc["symbol"].astype(str).map(current_map).fillna("")
+            cached_provider = pc["provider_symbol"].fillna("").astype(str)
+            same_mapping = cached_provider.eq(current_provider)
+        skip.update(pc.loc[failed_recently & same_mapping, "symbol"].astype(str))
 
     work = work[~work["symbol"].astype(str).isin(skip)].copy()
-
     if non_us_first and "country" in work.columns:
         work["_region_priority"] = np.where(work["country"].astype(str).eq("United States"), 1, 0)
         work = work.sort_values(["_region_priority", "_weight"], ascending=[True, False])
     else:
         work = work.sort_values("_weight", ascending=False)
+    return work["symbol"].astype(str).head(int(limit)).tolist()
+
+
+def select_stale_symbols(
+    universe: pd.DataFrame,
+    cache: pd.DataFrame,
+    timestamp_col: str,
+    max_age_hours: float,
+    limit: int,
+    failure_cooldown_hours: float = 6,
+    non_us_first: bool = False,
+) -> list[str]:
+    """Return missing/stale symbols, prioritizing oldest data and skipping recent failures."""
+    work = universe.copy()
+    work["_weight"] = pd.to_numeric(work["ishares_weight_pct"], errors="coerce").fillna(0) if "ishares_weight_pct" in work.columns else pd.Series(0.0, index=work.index)
+    now = pd.Timestamp.now(tz="UTC")
+
+    if cache is None or cache.empty or "symbol" not in cache.columns:
+        work["_ts"] = pd.NaT
+        work["_failed_recently"] = False
+    else:
+        c = cache.drop_duplicates("symbol", keep="last").copy()
+        ts = pd.to_datetime(c.get(timestamp_col, pd.Series(index=c.index, dtype=object)), errors="coerce", utc=True)
+        attempt_col = "price_attempted_at" if timestamp_col.startswith("price") else "fundamental_attempted_at"
+        attempt = pd.to_datetime(c.get(attempt_col, c.get(timestamp_col, pd.Series(index=c.index, dtype=object))), errors="coerce", utc=True)
+        err = c.get("provider_error", pd.Series("", index=c.index)).fillna("").astype(str)
+        c["_ts"] = ts
+        c["_failed_recently"] = err.ne("") & (attempt >= now - pd.Timedelta(hours=float(failure_cooldown_hours)))
+        work = work.merge(c[["symbol", "_ts", "_failed_recently"]], on="symbol", how="left")
+        work["_failed_recently"] = work["_failed_recently"].eq(True)
+
+    cutoff = now - pd.Timedelta(hours=float(max_age_hours))
+    due = work["_ts"].isna() | (work["_ts"] < cutoff)
+    work = work[due & ~work["_failed_recently"]].copy()
+    work["_age_sort"] = work["_ts"].fillna(pd.Timestamp("1970-01-01", tz="UTC"))
+    if non_us_first and "country" in work.columns:
+        work["_region_priority"] = np.where(work["country"].astype(str).eq("United States"), 1, 0)
+        work = work.sort_values(["_region_priority", "_age_sort", "_weight"], ascending=[True, True, False])
+    else:
+        work = work.sort_values(["_age_sort", "_weight"], ascending=[True, False])
     return work["symbol"].astype(str).head(int(limit)).tolist()
 
 

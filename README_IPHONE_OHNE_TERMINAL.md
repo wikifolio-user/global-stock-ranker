@@ -1,7 +1,17 @@
-# Global Stock Ranker 3.1 – kostenlos, weltweit, ohne Terminal
+# Global Stock Ranker 3.3 – kostenlos, weltweit, ohne Terminal
 
 Diese Version ersetzt FMP vollständig. Sie kombiniert mehrere kostenlose Quellen und ist so aufgebaut, dass du die Dateien direkt auf dem iPhone in GitHub anlegen oder ersetzen kannst.
 
+
+
+## Neu in Version 3.2
+
+- Yahoo-Fundamentals werden nicht mehr live über `quoteSummary` geladen, weil Streamlit Cloud wiederholt 401/Invalid-Crumb meldet.
+- Yahoo bleibt für Kurs-/Trenddaten, aber über den crumb-freien v8-Chart-Endpunkt.
+- Kursläufe werden in kleinen Batches gedrosselt und stoppen bei Rate-Limits.
+- Bestehende Yahoo-Fundamentals im Cache bleiben erhalten und werden weiter als Fallback gelesen.
+- Internationale Fundamentals werden weiter mit Finnhub aufgebaut; US-Fundamentals mit SEC EDGAR.
+- Für den ersten Kurslauf nach dem Upgrade `Top 250` oder `Top 500` verwenden.
 
 ## Neu in Version 3.1
 
@@ -126,3 +136,9 @@ Für normale Anpassungen reicht meistens `settings.py`. Dort kannst du Schwellen
 - `data_sources.py`: SEC/Finnhub/Yahoo-Adapter
 - `pipeline.py`: Quellen-Merge, Confidence, Cache
 - `app.py`: Oberfläche
+
+## Version 3.3 – einfacher Betrieb
+
+Im Alltag brauchst du nur noch **🔄 Alles intelligent aktualisieren**. Die App prüft selbst, welche Daten fehlen oder veraltet sind, und führt Universum, Kurse/Trend, SEC und Finnhub in der richtigen Reihenfolge aus. Bereits aktuelle Daten werden nicht erneut geladen.
+
+Für echte Dauerhaftigkeit über Streamlit-Redeploys hinweg enthält 3.3 zusätzlich einen GitHub-Actions-Datenagenten. Die einmalige Einrichtung steht in `UPGRADE_3_3.md`. Danach pflegt der Agent `data_cache/` automatisch und die App stellt diesen Cache nach einem Neustart wieder her.

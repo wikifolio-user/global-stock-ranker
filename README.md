@@ -1,9 +1,7 @@
-# Global Stock Ranker 3.1
+# Global Stock Ranker 3.3
 
-A mobile-friendly Streamlit research app for a global equity universe using free data sources.
+Mobile-friendly Streamlit research app for a global equity universe using free data sources: iShares MSCI ACWI holdings, SEC EDGAR, Finnhub Basic Financials and Yahoo Chart prices.
 
-Core sources: iShares MSCI ACWI holdings, SEC EDGAR, Finnhub Basic Financials and Yahoo/yfinance. The app combines fundamental quality, growth, free cash flow, balance sheet, valuation, trend, DCF proxies, source provenance and Data Confidence.
+Version 3.3 adds an intelligent stale-aware cache, one-click refresh orchestration, progress feedback and an optional GitHub Actions background data agent. Fresh data is reused instead of downloaded again. The scheduled agent persists compressed cache files under `data_cache/`, allowing Streamlit to restore data after redeploys.
 
-Version 3.1 focuses on international ticker reliability and data-pipeline progress. It fixes malformed Yahoo-style symbols such as `BP..L`, adds robust exchange/country suffix inference, prevents failed symbols from consuming every enrichment batch, aligns coverage with ranking eligibility, and expands provider diagnostics.
-
-For iPhone-only deployment and upgrade steps, read `README_IPHONE_OHNE_TERMINAL.md` and `UPGRADE_3_1.md`.
+See `UPGRADE_3_3.md` for the iPhone-friendly upgrade and GitHub Actions setup.
