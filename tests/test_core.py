@@ -118,3 +118,110 @@ def test_mapping_change_bypasses_failure_cooldown():
     })
     selected = select_next_symbols(universe, cache, 1, retry_after_days=7)
     assert selected == ["BP."]
+
+
+def test_yahoo_chart_parser_without_crumb(monkeypatch):
+    import data_sources
+
+    class FakeResponse:
+        status_code = 200
+        ok = True
+
+        def json(self):
+            n = 260
+            return {
+                "chart": {
+                    "result": [{
+                        "timestamp": list(range(n)),
+                        "indicators": {
+                            "quote": [{
+                                "close": [100 + i * 0.1 for i in range(n)],
+                                "high": [101 + i * 0.1 for i in range(n)],
+                                "low": [99 + i * 0.1 for i in range(n)],
+                                "volume": [1000 + i for i in range(n)],
+                            }],
+                            "adjclose": [{"adjclose": [100 + i * 0.1 for i in range(n)]}],
+                        },
+                    }],
+                    "error": None,
+                }
+            }
+
+    def fake_get(*args, **kwargs):
+        assert "/v8/finance/chart/" in args[0]
+        assert "crumb" not in kwargs.get("params", {})
+        return FakeResponse()
+
+    monkeypatch.setattr(data_sources.requests, "get", fake_get)
+    row = data_sources._yahoo_chart_row("TEST", "TEST", period="1y")
+    assert row["provider_error"] == ""
+    assert row["price_source"] == "YAHOO_CHART"
+    assert row["price"] > 0
+    assert row["priceAvg200"] > 0
+    assert row["return12m"] > 0
+
+
+def test_stale_selector_skips_fresh_and_prioritizes_missing():
+    from pipeline import select_stale_symbols
+
+    now = pd.Timestamp.now(tz="UTC")
+    universe = pd.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "country": ["United States", "France", "Japan"],
+        "ishares_weight_pct": [3.0, 2.0, 1.0],
+    })
+    cache = pd.DataFrame({
+        "symbol": ["A", "B"],
+        "price_updated_at": [now.isoformat(), (now - pd.Timedelta(hours=30)).isoformat()],
+        "provider_error": ["", ""],
+    })
+    selected = select_stale_symbols(
+        universe, cache, "price_updated_at", max_age_hours=22, limit=2,
+        failure_cooldown_hours=6,
+    )
+    assert selected == ["C", "B"]
+
+
+def test_recent_price_failure_gets_cooldown():
+    from pipeline import select_stale_symbols
+
+    now = pd.Timestamp.now(tz="UTC")
+    universe = pd.DataFrame({
+        "symbol": ["A", "B"],
+        "ishares_weight_pct": [2.0, 1.0],
+    })
+    cache = pd.DataFrame({
+        "symbol": ["A"],
+        "price_attempted_at": [now.isoformat()],
+        "provider_error": ["RATE_LIMIT"],
+    })
+    selected = select_stale_symbols(
+        universe, cache, "price_updated_at", max_age_hours=22, limit=2,
+        failure_cooldown_hours=6,
+    )
+    assert selected == ["B"]
+
+
+def test_fresh_useful_finnhub_rows_refresh_only_when_old():
+    from pipeline import select_next_symbols
+
+    now = pd.Timestamp.now(tz="UTC")
+    universe = pd.DataFrame({
+        "symbol": ["A", "B"],
+        "provider_symbol": ["A.PA", "B.PA"],
+        "country": ["France", "France"],
+        "ishares_weight_pct": [2.0, 1.0],
+    })
+    cache = pd.DataFrame({
+        "symbol": ["A"],
+        "provider_symbol": ["A.PA"],
+        "fundamental_updated_at": [(now - pd.Timedelta(days=2)).isoformat()],
+        "provider_error": [""],
+        "returnOnInvestedCapitalTTM": [0.15],
+        "grossProfitMarginTTM": [0.4],
+        "operatingProfitMarginTTM": [0.2],
+        "freeCashFlowYieldTTM": [0.05],
+        "priceToEarningsRatioTTM": [18.0],
+    })
+    selected = select_next_symbols(universe, cache, 2, refresh_after_days=14)
+    assert selected == ["B"]
