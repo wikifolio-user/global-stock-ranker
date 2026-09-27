@@ -5,11 +5,11 @@ import pandas as pd
 
 
 def make_demo_universe(n: int = 450, seed: int = 42) -> pd.DataFrame:
-    """Synthetic data only, so the UI can be evaluated without an API key."""
+    """Synthetic dataset so UI/scoring can be evaluated without live providers."""
     rng = np.random.default_rng(seed)
     symbols = [f"DEMO{i:04d}" for i in range(1, n + 1)]
-    countries = rng.choice(["USA", "Germany", "Japan", "Switzerland", "UK", "France", "Canada", "Australia"], n)
-    sectors = rng.choice(["Technology", "Industrials", "Healthcare", "Consumer", "Communication", "Materials"], n)
+    countries = rng.choice(["United States", "Germany", "Japan", "Switzerland", "United Kingdom", "France", "Canada", "Australia"], n)
+    sectors = rng.choice(["Information Technology", "Industrials", "Health Care", "Consumer Discretionary", "Communication", "Materials"], n)
     market_cap = np.exp(rng.normal(np.log(12e9), 1.25, n)).clip(2e8, 2e12)
     roic = rng.normal(0.16, 0.10, n).clip(-0.2, 0.55)
     gross = rng.normal(0.48, 0.16, n).clip(0.08, 0.9)
@@ -31,13 +31,15 @@ def make_demo_universe(n: int = 450, seed: int = 42) -> pd.DataFrame:
     year_high = np.maximum.reduce([price, ma50, ma200]) * rng.uniform(1.02, 1.35, n)
     year_low = np.minimum.reduce([price, ma50, ma200]) * rng.uniform(0.55, 0.95, n)
 
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "symbol": symbols,
+        "provider_symbol": symbols,
         "name": [f"Synthetic Company {i}" for i in range(1, n + 1)],
         "country": countries,
         "sector": sectors,
         "exchange": "DEMO",
         "currency": "USD",
+        "ishares_weight_pct": rng.uniform(0.01, 0.8, n),
         "marketCap": market_cap,
         "returnOnInvestedCapitalTTM": roic,
         "grossProfitMarginTTM": gross,
@@ -55,6 +57,7 @@ def make_demo_universe(n: int = 450, seed: int = 42) -> pd.DataFrame:
         "capexToRevenueTTM": rng.beta(1.5, 9, n).clip(0, 0.4),
         "revenuePerShareTTM": revenue_ps,
         "freeCashFlowPerShareTTM": fcf_ps,
+        "fcfMarginTTM": fcf_margin,
         "revenueGrowth": rev_growth,
         "epsGrowth": eps_growth,
         "fcfGrowth": fcf_growth,
@@ -64,5 +67,23 @@ def make_demo_universe(n: int = 450, seed: int = 42) -> pd.DataFrame:
         "priceAvg200": ma200,
         "yearHigh": year_high,
         "yearLow": year_low,
+        "return1m": rng.normal(0.01, 0.08, n),
+        "return3m": rng.normal(0.03, 0.14, n),
+        "return6m": rng.normal(0.06, 0.20, n),
+        "return12m": rng.normal(0.12, 0.30, n),
         "changePercentage": rng.normal(0.0, 2.2, n).clip(-10, 10),
+        "data_confidence": rng.uniform(72, 99, n),
+        "fundamental_sources": "DEMO",
+        "confidence_label": "Hoch",
     })
+    for c in [
+        "returnOnInvestedCapitalTTM", "grossProfitMarginTTM", "operatingProfitMarginTTM",
+        "incomeQualityTTM", "freeCashFlowOperatingCashFlowRatioTTM", "freeCashFlowYieldTTM",
+        "netDebtToEBITDATTM", "currentRatioTTM", "interestCoverageRatioTTM",
+        "priceToEarningsRatioTTM", "forwardPriceToEarningsGrowthRatioTTM",
+        "enterpriseValueMultipleTTM", "stockBasedCompensationToRevenueTTM", "capexToRevenueTTM",
+        "revenuePerShareTTM", "freeCashFlowPerShareTTM", "revenueGrowth", "epsGrowth",
+        "fcfGrowth", "sharesGrowth", "fcfMarginTTM",
+    ]:
+        df[f"source__{c}"] = "DEMO"
+    return df

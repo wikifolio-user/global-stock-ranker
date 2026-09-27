@@ -9,6 +9,8 @@ import pandas as pd
 
 HISTORY_METRICS = [
     "score_total",
+    "ranking_score",
+    "score_confidence_adjusted",
     "score_quality",
     "score_growth",
     "score_cashflow",
@@ -19,6 +21,7 @@ HISTORY_METRICS = [
     "score_risk",
     "red_flag_penalty",
     "data_completeness",
+    "data_confidence",
     "returnOnInvestedCapitalTTM",
     "freeCashFlowYieldTTM",
     "revenueGrowth",
@@ -28,37 +31,34 @@ HISTORY_METRICS = [
     "netDebtToEBITDATTM",
     "priceToEarningsRatioTTM",
     "fcfMarginTTM",
+    "dcf_margin_of_safety",
+    "implied_fcf_growth_10y",
 ]
-
-
-def _read_csv(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame()
 
 
 def load_history(path: str | Path) -> pd.DataFrame:
     path = Path(path)
-    df = _read_csv(path)
-    if df.empty:
-        return df
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
     if "snapshot_date" in df.columns:
         df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.date.astype("string")
     return df
 
 
-def make_snapshot(scored: pd.DataFrame, snapshot_date: date | None = None, top_n: int = 300) -> pd.DataFrame:
+def make_snapshot(scored: pd.DataFrame, snapshot_date: date | None = None, top_n: int = 350) -> pd.DataFrame:
     if scored.empty:
         return pd.DataFrame()
     d = snapshot_date or datetime.now().date()
-    ranked = scored.sort_values(["score_total", "data_completeness"], ascending=False).copy()
+    rank_cols = [c for c in ["ranking_score", "score_total", "data_confidence"] if c in scored.columns]
+    ranked = scored.sort_values(rank_cols, ascending=[False] * len(rank_cols)).copy()
     ranked["history_rank"] = np.arange(1, len(ranked) + 1)
     ranked = ranked.head(top_n)
     cols = ["symbol", "history_rank"]
-    for c in ["name", "exchange", "currency", "marketCap"] + HISTORY_METRICS:
+    for c in ["name", "country", "sector", "exchange", "currency", "fundamental_sources"] + HISTORY_METRICS:
         if c in ranked.columns and c not in cols:
             cols.append(c)
     snap = ranked[cols].copy()
@@ -66,25 +66,17 @@ def make_snapshot(scored: pd.DataFrame, snapshot_date: date | None = None, top_n
     return snap
 
 
-def append_snapshot(
-    scored: pd.DataFrame,
-    path: str | Path,
-    snapshot_date: date | None = None,
-    top_n: int = 300,
-    keep_days: int = 365,
-) -> pd.DataFrame:
+def append_snapshot(scored: pd.DataFrame, path: str | Path, snapshot_date: date | None = None, top_n: int = 350, keep_days: int = 730) -> pd.DataFrame:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     snap = make_snapshot(scored, snapshot_date=snapshot_date, top_n=top_n)
     if snap.empty:
         return load_history(path)
-
     history = load_history(path)
     d = str(snap["snapshot_date"].iloc[0])
     if not history.empty and "snapshot_date" in history.columns:
         history = history[history["snapshot_date"].astype(str) != d]
     merged = pd.concat([history, snap], ignore_index=True, sort=False)
-
     cutoff = datetime.now().date() - timedelta(days=keep_days)
     dates = pd.to_datetime(merged["snapshot_date"], errors="coerce")
     merged = merged[dates.dt.date >= cutoff].copy()
@@ -98,7 +90,7 @@ def merge_imported_history(existing: pd.DataFrame, imported: pd.DataFrame) -> pd
         return existing
     required = {"snapshot_date", "symbol", "history_rank", "score_total"}
     if not required.issubset(imported.columns):
-        raise ValueError("Historie benötigt mindestens snapshot_date, symbol, history_rank und score_total.")
+        raise ValueError("Historie benötigt snapshot_date, symbol, history_rank und score_total.")
     frames = [df for df in [existing, imported] if not df.empty]
     if not frames:
         return pd.DataFrame()
@@ -125,7 +117,6 @@ def add_history_deltas(current: pd.DataFrame, history: pd.DataFrame, current_dat
     out = current.copy()
     if out.empty:
         return out
-
     prev = previous_snapshot(history, current_date=current_date)
     if prev.empty:
         out["score_delta"] = np.nan
@@ -135,23 +126,21 @@ def add_history_deltas(current: pd.DataFrame, history: pd.DataFrame, current_dat
         return out
 
     keep = ["symbol", "history_rank", "score_total"]
-    for c in ["score_quality", "score_growth", "score_cashflow", "score_valuation", "red_flag_penalty"]:
+    for c in ["score_quality", "score_growth", "score_cashflow", "score_valuation", "red_flag_penalty", "data_confidence", "dcf_margin_of_safety"]:
         if c in prev.columns:
             keep.append(c)
     prev = prev[keep].drop_duplicates("symbol").copy()
-    rename = {c: f"prev_{c}" for c in prev.columns if c != "symbol"}
-    prev = prev.rename(columns=rename)
+    prev = prev.rename(columns={c: f"prev_{c}" for c in prev.columns if c != "symbol"})
     out = out.merge(prev, on="symbol", how="left")
 
     out["score_delta"] = pd.to_numeric(out["score_total"], errors="coerce") - pd.to_numeric(out.get("prev_score_total"), errors="coerce")
     current_rank = pd.to_numeric(out.get("history_rank"), errors="coerce")
     prev_rank = pd.to_numeric(out.get("prev_history_rank"), errors="coerce")
     out["history_rank_previous"] = prev_rank
-    out["rank_delta"] = prev_rank - current_rank  # positive = ranking improved
+    out["rank_delta"] = prev_rank - current_rank
 
     def label(row: pd.Series) -> str:
-        ds = row.get("score_delta")
-        dr = row.get("rank_delta")
+        ds, dr = row.get("score_delta"), row.get("rank_delta")
         if pd.isna(ds):
             return "● Neu"
         if ds >= 3 or (pd.notna(dr) and dr >= 15 and ds >= 0):

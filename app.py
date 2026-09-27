@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -10,38 +11,75 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from data_sources import (
+    DataSourceError,
+    enrich_finnhub_fundamentals,
+    enrich_yahoo_fundamentals,
+    fetch_sec_bulk_snapshot,
+    fetch_yahoo_price_snapshot,
+)
 from demo import make_demo_universe
-from fmp import FMPClient, FMPError, build_global_snapshot
 from history import add_history_deltas, append_snapshot, load_history, merge_imported_history, symbol_history
+from pipeline import (
+    FUNDAMENTAL_METRICS,
+    assemble_snapshot,
+    coverage_summary,
+    import_cache_bytes,
+    load_cache,
+    provenance_table,
+    save_cache,
+    select_next_symbols,
+    upsert_cache,
+)
 from scoring import add_scores, category_from_score
+from settings import (
+    APP_VERSION,
+    DEFAULT_MIN_COMPLETENESS,
+    DEFAULT_MIN_CONFIDENCE,
+    EXCLUDE_SPECIAL_SECTORS_DEFAULT,
+    FINNHUB_DEFAULT_BATCH,
+    HISTORY_KEEP_DAYS,
+    HISTORY_TOP_N,
+    SPECIAL_SECTORS,
+    TOP_N,
+)
 from signals import add_research_signals
-from settings import DEFAULT_MIN_COMPLETENESS, DEFAULT_MIN_MARKET_CAP_BN, HISTORY_KEEP_DAYS, HISTORY_TOP_N, TOP_N
+from universe import fetch_acwi_universe, load_universe_cache, save_universe
 
 
 load_dotenv()
-CACHE_DIR = Path(".cache")
-CACHE_DIR.mkdir(exist_ok=True)
-SNAPSHOT = CACHE_DIR / "global_snapshot.csv.gz"
-HISTORY = Path(os.getenv("HISTORY_PATH", str(CACHE_DIR / "ranking_history.csv.gz")))
+CACHE_DIR = Path(os.getenv("CACHE_DIR", ".cache_v3"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+PATHS = {
+    "universe": CACHE_DIR / "universe.csv.gz",
+    "sec": CACHE_DIR / "sec_fundamentals.csv.gz",
+    "finnhub": CACHE_DIR / "finnhub_fundamentals.csv.gz",
+    "yahoo": CACHE_DIR / "yahoo_fundamentals.csv.gz",
+    "prices": CACHE_DIR / "yahoo_prices.csv.gz",
+    "history": CACHE_DIR / "ranking_history.csv.gz",
+}
 
-st.set_page_config(page_title="Global Stock Ranker", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(
+    page_title="Global Stock Ranker 3.0",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-# Mobile-first polish. Streamlit remains usable on desktop while cards collapse naturally on iPhone.
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 1.0rem; padding-bottom: 3rem; max-width: 1450px;}
-      [data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.18); padding: .65rem; border-radius: .85rem;}
-      [data-testid="stMetricValue"] {font-size: 1.45rem;}
-      div[data-testid="stVerticalBlockBorderWrapper"] {border-radius: 1rem;}
-      .small-note {font-size:.82rem; opacity:.72;}
-      @media (max-width: 768px) {
-        .block-container {padding-left: .75rem; padding-right: .75rem; padding-top: .5rem;}
-        h1 {font-size: 1.75rem !important;}
-        h2 {font-size: 1.35rem !important;}
-        h3 {font-size: 1.15rem !important;}
-        [data-testid="stMetricValue"] {font-size: 1.22rem;}
-        button[kind="secondary"], button[kind="primary"] {min-height: 2.65rem;}
+      .block-container {padding-top:.8rem; padding-bottom:3rem; max-width:1500px;}
+      [data-testid="stMetric"] {border:1px solid rgba(128,128,128,.18); padding:.65rem; border-radius:.85rem;}
+      [data-testid="stMetricValue"] {font-size:1.35rem;}
+      div[data-testid="stVerticalBlockBorderWrapper"] {border-radius:1rem;}
+      .small-note {font-size:.82rem; opacity:.74;}
+      .status-pill {display:inline-block; padding:.2rem .55rem; border:1px solid rgba(128,128,128,.25); border-radius:999px; font-size:.82rem; margin-right:.3rem;}
+      @media (max-width:768px) {
+        .block-container {padding-left:.7rem; padding-right:.7rem; padding-top:.4rem;}
+        h1 {font-size:1.65rem !important;} h2 {font-size:1.3rem !important;} h3 {font-size:1.08rem !important;}
+        [data-testid="stMetricValue"] {font-size:1.16rem;}
+        button[kind="secondary"], button[kind="primary"] {min-height:2.7rem;}
       }
     </style>
     """,
@@ -49,35 +87,40 @@ st.markdown(
 )
 
 
-def pct(v, digits: int = 1):
-    return "—" if pd.isna(v) else f"{float(v):.{digits}%}"
-
-
-def multiple(v):
-    return "—" if pd.isna(v) else f"{float(v):.1f}x"
-
-
-def signed(v, suffix=""):
-    return "—" if pd.isna(v) else f"{float(v):+.1f}{suffix}"
-
-
-def money(v):
-    if pd.isna(v):
+def pct(v, digits: int = 1) -> str:
+    try:
+        if pd.isna(v):
+            return "—"
+        return f"{float(v):.{digits}%}"
+    except Exception:
         return "—"
-    v = float(v)
-    if abs(v) >= 1e12:
-        return f"{v/1e12:.2f} Bio."
-    if abs(v) >= 1e9:
-        return f"{v/1e9:.1f} Mrd."
-    if abs(v) >= 1e6:
-        return f"{v/1e6:.1f} Mio."
-    return f"{v:,.0f}"
 
 
-def price(v, currency=""):
-    if pd.isna(v):
+def multiple(v) -> str:
+    try:
+        if pd.isna(v):
+            return "—"
+        return f"{float(v):.1f}x"
+    except Exception:
         return "—"
-    return f"{float(v):,.2f} {currency}".strip()
+
+
+def signed(v, suffix="") -> str:
+    try:
+        if pd.isna(v):
+            return "—"
+        return f"{float(v):+.1f}{suffix}"
+    except Exception:
+        return "—"
+
+
+def price(v, currency="") -> str:
+    try:
+        if pd.isna(v):
+            return "—"
+        return f"{float(v):,.2f} {currency}".strip()
+    except Exception:
+        return "—"
 
 
 def safe_series(df: pd.DataFrame, col: str) -> pd.Series:
@@ -86,181 +129,271 @@ def safe_series(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.Series(np.nan, index=df.index)
 
 
-def save_snapshot(df: pd.DataFrame):
-    df.to_csv(SNAPSHOT, index=False, compression="gzip")
+def weighted_universe_slice(universe: pd.DataFrame, scope: str) -> pd.DataFrame:
+    if universe.empty:
+        return universe
+    work = universe.copy()
+    work["_weight"] = pd.to_numeric(work.get("ishares_weight_pct"), errors="coerce").fillna(0)
+    work = work.sort_values("_weight", ascending=False)
+    if scope.startswith("Top 500"):
+        return work.head(500).drop(columns="_weight")
+    if scope.startswith("Top 1000"):
+        return work.head(1000).drop(columns="_weight")
+    return work.drop(columns="_weight")
 
 
-def load_snapshot() -> pd.DataFrame | None:
-    if SNAPSHOT.exists():
-        return pd.read_csv(SNAPSHOT)
-    return None
+def build_backup_zip() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, path in PATHS.items():
+            if path.exists():
+                zf.write(path, arcname=f"{name}.csv.gz")
+        manifest = (
+            f"Global Stock Ranker Backup\nVersion: {APP_VERSION}\n"
+            f"Created: {datetime.now().isoformat()}\n"
+        )
+        zf.writestr("BACKUP_INFO.txt", manifest)
+    return buffer.getvalue()
 
 
-@st.cache_data(show_spinner=False)
-def demo_data() -> pd.DataFrame:
-    return make_demo_universe()
+def restore_backup(upload) -> list[str]:
+    restored = []
+    if upload is None:
+        return restored
+    raw = upload.getvalue()
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+        for name, path in PATHS.items():
+            arc = f"{name}.csv.gz"
+            if arc in zf.namelist():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(zf.read(arc))
+                restored.append(name)
+    return restored
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_quotes(api_key_value: str, symbols: tuple[str, ...]) -> pd.DataFrame:
-    if not api_key_value or not symbols:
-        return pd.DataFrame()
-    return FMPClient(api_key_value).batch_quote(list(symbols))
+def load_live_caches():
+    return (
+        load_universe_cache(PATHS["universe"]),
+        load_cache(PATHS["sec"]),
+        load_cache(PATHS["finnhub"]),
+        load_cache(PATHS["yahoo"]),
+        load_cache(PATHS["prices"]),
+    )
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_detail_bundle(api_key_value: str, symbol: str) -> dict[str, pd.DataFrame]:
-    client = FMPClient(api_key_value)
-    bundle: dict[str, pd.DataFrame] = {}
-    calls = {
-        "profile": lambda: client.profile(symbol),
-        "estimates": lambda: client.analyst_estimates(symbol),
-        "price_change": lambda: client.stock_price_change(symbol),
-        "price_target": lambda: client.price_target_consensus(symbol),
-        "grades": lambda: client.grades_summary(symbol),
-    }
-    for key, fn in calls.items():
-        try:
-            bundle[key] = fn()
-        except Exception:
-            bundle[key] = pd.DataFrame()
-    return bundle
-
-
-st.title("📈 Global Stock Ranker")
+st.title("📈 Global Stock Ranker 3.0")
 st.caption(
-    "Top-100-Research weltweit · Qualität + Wachstum + Cashflow + Bilanz + Bewertung + Verlauf. "
-    "Die Signale priorisieren Analysearbeit und sind keine individuelle Kauf-/Verkaufsempfehlung."
+    "Kostenloses Multi-Source-Research · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo/yfinance · "
+    "Qualität, Wachstum, FCF, Bilanz, Bewertung, DCF-Proxy, Trend und Veränderungshistorie."
 )
 
+# ---------------------------------------------------------------------------
+# Sidebar / data operations
+# ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Daten & Filter")
-    env_key = os.getenv("FMP_API_KEY", "")
-    api_key = st.text_input("FMP API-Key", value=env_key, type="password", help="Am besten als Streamlit Secret FMP_API_KEY speichern.")
-    mode = st.radio("Datenmodus", ["Live / Cache", "Demo"], horizontal=False)
-    min_mcap_bn = st.number_input("Min. Marktkapitalisierung (Mrd.)", min_value=0.0, value=DEFAULT_MIN_MARKET_CAP_BN, step=0.5)
+    st.header("Daten & Ranking")
+    mode = st.radio("Datenmodus", ["Live kostenlos", "Demo"], horizontal=False)
     min_completeness = st.slider("Min. Datenvollständigkeit", 0, 100, DEFAULT_MIN_COMPLETENESS, 5)
-    exclude_financial_like = st.checkbox(
-        "Finanzwerte heuristisch herausfiltern",
-        value=True,
-        help="Banken/Versicherer benötigen ein eigenes Bewertungsmodell.",
+    min_confidence = st.slider("Min. Data Confidence", 0, 100, DEFAULT_MIN_CONFIDENCE, 5)
+    exclude_special = st.checkbox(
+        "Finanzwerte & REITs herausfiltern",
+        value=EXCLUDE_SPECIAL_SECTORS_DEFAULT,
+        help="Das Standardmodell ist für Banken/Versicherer/REITs nicht optimal. Diese benötigen Spezialmodelle.",
     )
-    load_quotes = st.checkbox("Kurs-/Trenddaten für Top 100 laden", value=True)
-    auto_daily_refresh = st.checkbox("Einmal täglich automatisch aktualisieren", value=True, help="Wenn ein API-Key vorhanden ist, wird beim ersten Öffnen eines neuen Tages ein frischer Fundamentalsnapshot geladen.")
-    force_refresh = st.button("Fundamentaldaten neu laden", use_container_width=True)
 
     st.divider()
-    st.subheader("Veränderungshistorie")
-    history_upload = st.file_uploader("Historie importieren", type=["csv", "gz"], help="Zum Wiederherstellen nach Cloud-Neustarts.")
-    st.caption("Die App speichert tägliche Snapshots lokal. Auf Community-Cloud kann lokaler Speicher bei Neustarts verloren gehen – daher regelmäßig exportieren.")
+    st.subheader("Kostenlose Quellen")
+    finnhub_key = st.text_input(
+        "Finnhub API-Key",
+        value=os.getenv("FINNHUB_API_KEY", ""),
+        type="password",
+        help="Kostenloser Key. Für internationale Fundamentaldaten empfohlen.",
+    )
+    sec_user_agent = st.text_input(
+        "SEC User-Agent",
+        value=os.getenv("SEC_USER_AGENT", ""),
+        placeholder="Name deine@email.de",
+        help="Kein API-Key. Die SEC verlangt bei automatisierten Abrufen einen identifizierbaren User-Agent mit Kontakt.",
+    )
 
+    st.divider()
+    st.subheader("Aktualisieren")
+    refresh_universe = st.button("1 · Weltuniversum aktualisieren", use_container_width=True)
+    price_scope = st.selectbox("Kursuniversum", ["Top 500", "Top 1000", "Global (~2.200)"])
+    refresh_prices = st.button("2 · Kurs & Trend aktualisieren", use_container_width=True)
+    refresh_sec = st.button("3 · SEC-US-Fundamentals aktualisieren", use_container_width=True)
 
-def get_live_data() -> tuple[pd.DataFrame, bool, str]:
-    """Return dataframe, whether a fresh API snapshot was fetched, and source label."""
-    cache_is_today = SNAPSHOT.exists() and datetime.fromtimestamp(SNAPSHOT.stat().st_mtime).date() == datetime.now().date()
-    if not force_refresh:
-        cached = load_snapshot()
-        if cached is not None and not cached.empty and (not auto_daily_refresh or cache_is_today or not api_key):
-            return cached, False, "Cache"
-    if not api_key:
-        cached = load_snapshot()
-        if cached is not None and not cached.empty:
-            return cached, False, "Cache"
-        raise FMPError("Für den ersten Live-Abruf wird ein FMP API-Key benötigt.")
-    client = FMPClient(api_key)
-    with st.spinner("Globale Fundamentaldaten werden geladen …"):
-        df = build_global_snapshot(client)
-    save_snapshot(df)
-    return df, True, "Live"
+    enrich_source = st.selectbox("Internationale Ergänzung", ["Finnhub (empfohlen)", "Yahoo Fallback"])
+    enrich_batch = st.selectbox("Aktien pro Lauf", [50, 100, 250, 500], index=1)
+    enrich_fundamentals = st.button("4 · Fehlende Fundamentals ergänzen", use_container_width=True)
 
+    st.caption(
+        "Der globale kostenlose Datensatz wird schrittweise aufgebaut und lokal gecacht. "
+        "Je höher die Abdeckung, desto belastbarer ist die weltweite Top-100-Liste."
+    )
 
-try:
-    if mode == "Demo":
-        raw, fresh_data, data_source = demo_data(), False, "Demo"
-    else:
-        raw, fresh_data, data_source = get_live_data()
-except Exception as exc:
-    st.error(str(exc))
-    st.info("Du kannst auf 'Demo' wechseln, um Oberfläche und Scoring ohne API-Key zu testen.")
-    st.stop()
+# ---------------------------------------------------------------------------
+# Load / refresh live datasets
+# ---------------------------------------------------------------------------
+data_updated = False
+operation_messages: list[tuple[str, str]] = []
 
-# Load/merge manually backed-up history first.
-history = load_history(HISTORY)
-if history_upload is not None:
-    try:
-        compression = "gzip" if str(getattr(history_upload, "name", "")).lower().endswith(".gz") else None
-        imported = pd.read_csv(history_upload, compression=compression)
-        history = merge_imported_history(history, imported)
-        HISTORY.parent.mkdir(parents=True, exist_ok=True)
-        history.to_csv(HISTORY, index=False, compression="gzip")
-        st.sidebar.success(f"{len(imported):,} Historienzeilen importiert.".replace(",", "."))
-    except Exception as exc:
-        st.sidebar.error(f"Historie konnte nicht importiert werden: {exc}")
+if mode == "Demo":
+    raw = make_demo_universe()
+    universe = raw.copy()
+    sec_cache = finnhub_cache = yahoo_cache = price_cache = pd.DataFrame()
+    data_label = "Synthetischer Demo-Datensatz"
+else:
+    universe, sec_cache, finnhub_cache, yahoo_cache, price_cache = load_live_caches()
 
-# Fundamental score for the entire universe. Global history rank is deliberately independent of UI filters.
+    if universe.empty or refresh_universe:
+        try:
+            with st.spinner("Offizielles iShares-ACWI-Universum wird geladen …"):
+                universe = fetch_acwi_universe()
+                save_universe(universe, PATHS["universe"])
+            operation_messages.append(("success", f"Universum aktualisiert: {len(universe):,} Aktien.".replace(",", ".")))
+            data_updated = True
+        except Exception as exc:
+            if universe.empty:
+                st.error(str(exc))
+                st.info("Falls der Abruf temporär blockiert ist, später erneut versuchen oder den Demo-Modus verwenden.")
+                st.stop()
+            operation_messages.append(("warning", f"Universum blieb im Cache: {exc}"))
+
+    if refresh_prices and not universe.empty:
+        try:
+            scope = weighted_universe_slice(universe, price_scope)
+            with st.spinner(f"Kurs- und Trenddaten für {len(scope):,} Aktien werden geladen …".replace(",", ".")):
+                fresh_prices = fetch_yahoo_price_snapshot(scope)
+                price_cache = upsert_cache(price_cache, fresh_prices)
+                save_cache(price_cache, PATHS["prices"])
+            operation_messages.append(("success", f"Kursdaten aktualisiert: {len(fresh_prices):,} Aktien.".replace(",", ".")))
+            data_updated = True
+        except Exception as exc:
+            operation_messages.append(("error", f"Yahoo-Kursabruf: {exc}"))
+
+    if refresh_sec and not universe.empty:
+        try:
+            with st.spinner("SEC-XBRL-Bulkdaten werden berechnet …"):
+                fresh_sec = fetch_sec_bulk_snapshot(universe, sec_user_agent)
+                sec_cache = upsert_cache(sec_cache, fresh_sec)
+                save_cache(sec_cache, PATHS["sec"])
+            operation_messages.append(("success", f"SEC-US-Daten aktualisiert: {len(fresh_sec):,} Aktien.".replace(",", ".")))
+            data_updated = True
+        except Exception as exc:
+            operation_messages.append(("error", f"SEC-Abruf: {exc}"))
+
+    if enrich_fundamentals and not universe.empty:
+        try:
+            if enrich_source.startswith("Finnhub"):
+                if not finnhub_key:
+                    raise DataSourceError("Für Finnhub bitte den kostenlosen FINNHUB_API_KEY eintragen.")
+                symbols = select_next_symbols(universe, finnhub_cache, int(enrich_batch), non_us_first=True)
+                with st.spinner(f"Finnhub ergänzt bis zu {len(symbols)} Aktien …"):
+                    fresh = enrich_finnhub_fundamentals(universe, symbols, finnhub_key)
+                finnhub_cache = upsert_cache(finnhub_cache, fresh)
+                save_cache(finnhub_cache, PATHS["finnhub"])
+                good = int((fresh.get("provider_error", pd.Series(index=fresh.index, dtype=object)).fillna("") == "").sum()) if not fresh.empty else 0
+                operation_messages.append(("success", f"Finnhub-Lauf abgeschlossen: {len(fresh)} Antworten, {good} ohne Provider-Fehler."))
+            else:
+                symbols = select_next_symbols(universe, yahoo_cache, int(enrich_batch), non_us_first=True)
+                with st.spinner(f"Yahoo ergänzt bis zu {len(symbols)} Aktien …"):
+                    fresh = enrich_yahoo_fundamentals(universe, symbols, deep=False)
+                yahoo_cache = upsert_cache(yahoo_cache, fresh)
+                save_cache(yahoo_cache, PATHS["yahoo"])
+                operation_messages.append(("success", f"Yahoo-Fundamentals ergänzt: {len(fresh)} Antworten."))
+            data_updated = True
+        except Exception as exc:
+            operation_messages.append(("error", f"Fundamental-Ergänzung: {exc}"))
+
+    raw = assemble_snapshot(universe, sec_cache, finnhub_cache, yahoo_cache, price_cache)
+    data_label = "Kostenlose Multi-Source-Daten"
+
+for kind, msg in operation_messages:
+    getattr(st, kind)(msg)
+
+# ---------------------------------------------------------------------------
+# Score + history + research signals
+# ---------------------------------------------------------------------------
+history = load_history(PATHS["history"])
 scored_all = add_scores(raw)
-scored_all = scored_all.sort_values(["score_total", "data_completeness"], ascending=False).reset_index(drop=True)
-scored_all["history_rank"] = np.arange(1, len(scored_all) + 1)
 
-# Only a genuinely refreshed live dataset becomes a new daily history observation.
-if mode == "Live / Cache" and fresh_data:
-    try:
-        history = append_snapshot(scored_all, HISTORY, top_n=HISTORY_TOP_N, keep_days=HISTORY_KEEP_DAYS)
-    except Exception as exc:
-        st.warning(f"Snapshot konnte nicht gespeichert werden: {exc}")
+# Only sufficiently documented rows receive a global history rank. This prevents
+# sparse rows from looking artificially competitive.
+history_eligible = (
+    pd.to_numeric(scored_all.get("data_completeness"), errors="coerce").fillna(0) >= 55
+) & (
+    pd.to_numeric(scored_all.get("data_confidence"), errors="coerce").fillna(0) >= 55
+)
+scored_all["history_rank"] = np.nan
+eligible_idx = scored_all.loc[history_eligible].sort_values(["ranking_score", "score_total", "data_confidence"], ascending=False).index
+scored_all.loc[eligible_idx, "history_rank"] = np.arange(1, len(eligible_idx) + 1)
 
 scored_all = add_history_deltas(scored_all, history)
-scored_all["category"] = [category_from_score(s, c) for s, c in zip(scored_all["score_total"], scored_all["data_completeness"])]
+scored_all = add_research_signals(scored_all)
+scored_all["category"] = [
+    category_from_score(s, c, conf)
+    for s, c, conf in zip(scored_all["score_total"], scored_all["data_completeness"], scored_all.get("data_confidence", pd.Series(np.nan, index=scored_all.index)))
+]
 
-# Basic investability/data hygiene filters.
+if mode == "Live kostenlos" and data_updated and not scored_all.empty:
+    try:
+        # History stores the most investable rows, not sparse raw rows.
+        hist_source = scored_all.loc[history_eligible].sort_values(["ranking_score", "score_total", "data_confidence"], ascending=False)
+        history = append_snapshot(hist_source, PATHS["history"], top_n=HISTORY_TOP_N, keep_days=HISTORY_KEEP_DAYS)
+    except Exception as exc:
+        st.warning(f"Verlauf konnte nicht gespeichert werden: {exc}")
+
+# UI filters.
 scored = scored_all.copy()
-if "marketCap" in scored.columns:
-    scored["marketCap"] = pd.to_numeric(scored["marketCap"], errors="coerce")
-    scored = scored[scored["marketCap"].fillna(0) >= min_mcap_bn * 1e9]
-scored = scored[scored["data_completeness"] >= min_completeness]
+scored = scored[
+    (pd.to_numeric(scored["data_completeness"], errors="coerce").fillna(0) >= min_completeness)
+    & (pd.to_numeric(scored.get("data_confidence"), errors="coerce").fillna(0) >= min_confidence)
+]
+if exclude_special and "sector" in scored.columns:
+    scored = scored[~scored["sector"].astype(str).isin(SPECIAL_SECTORS)]
 
-if exclude_financial_like:
-    if "financialLeverageRatioTTM" in scored.columns:
-        lev = pd.to_numeric(scored["financialLeverageRatioTTM"], errors="coerce")
-        scored = scored[(lev.isna()) | (lev < 10)]
-    if "grossProfitMarginTTM" in scored.columns:
-        gm = pd.to_numeric(scored["grossProfitMarginTTM"], errors="coerce")
-        scored = scored[(gm.isna()) | ((gm >= 0) & (gm <= 1.2))]
-
-scored = scored.sort_values(["score_total", "data_completeness"], ascending=False).reset_index(drop=True)
+scored = scored.sort_values(["ranking_score", "score_total", "data_confidence", "score_valuation"], ascending=False).reset_index(drop=True)
 scored["rank"] = np.arange(1, len(scored) + 1)
 top100 = scored.head(TOP_N).copy()
 
-# Add market-price context only after the fundamental screen; this keeps API traffic small.
-if mode != "Demo" and api_key and load_quotes and not top100.empty:
-    try:
-        with st.spinner("Kurs- und Trenddaten für die Top 100 werden ergänzt …"):
-            quotes = cached_quotes(api_key, tuple(top100["symbol"].astype(str).tolist()))
-        if not quotes.empty:
-            qcols = [c for c in ["symbol", "price", "changePercentage", "volume", "dayLow", "dayHigh", "yearHigh", "yearLow", "priceAvg50", "priceAvg200"] if c in quotes.columns]
-            top100 = top100.drop(columns=[c for c in qcols if c != "symbol" and c in top100.columns], errors="ignore")
-            top100 = top100.merge(quotes[qcols].drop_duplicates("symbol"), on="symbol", how="left")
-    except Exception as exc:
-        st.info(f"Kursdaten konnten nicht ergänzt werden: {exc}")
+coverage = coverage_summary(raw) if mode != "Demo" else {
+    "universe": len(raw), "eligible_60": len(raw), "coverage_pct": 100.0,
+    "non_us_coverage_pct": 100.0, "status": "Demo"
+}
 
-top100 = add_research_signals(top100)
+# ---------------------------------------------------------------------------
+# KPI header
+# ---------------------------------------------------------------------------
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Universum", f"{int(coverage.get('universe', 0)):,}".replace(",", "."))
+k2.metric("Fundamental-Abdeckung", f"{float(coverage.get('coverage_pct', 0)):.0f}%")
+k3.metric("Nicht-US-Abdeckung", f"{float(coverage.get('non_us_coverage_pct', 0)):.0f}%")
+k4.metric("Rankingstatus", str(coverage.get("status", "—")))
 
-# Header KPIs.
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Aktien nach Filter", f"{len(scored):,}".replace(",", "."))
-c2.metric("Top-100 Cutoff", f"{top100['score_total'].min():.1f}" if not top100.empty else "—")
-roic_series = pd.to_numeric(safe_series(top100, "returnOnInvestedCapitalTTM"), errors="coerce")
-fcfy_series = pd.to_numeric(safe_series(top100, "freeCashFlowYieldTTM"), errors="coerce")
-c3.metric("Median ROIC", pct(roic_series.median()) if not top100.empty else "—")
-c4.metric("Median FCF Yield", pct(fcfy_series.median()) if not top100.empty else "—")
-st.markdown(f'<div class="small-note">Datenquelle: {data_source} · Historie: {history["snapshot_date"].nunique() if not history.empty else 0} Snapshot-Tage</div>', unsafe_allow_html=True)
+if mode != "Demo" and str(coverage.get("status")) == "Vorläufig":
+    st.warning(
+        "Die globale Abdeckung ist noch niedrig. Die aktuelle Top-100-Liste ist **vorläufig** und kann US-/bereits angereicherte Aktien bevorzugen. "
+        "Nutze SEC + mehrere Finnhub/Yahoo-Ergänzungsläufe, bis der Rankingstatus belastbarer wird."
+    )
 
-rank_tab, detail_tab, history_tab, methodology_tab = st.tabs(["🏆 Top 100", "🔎 Aktie", "🕘 Historie", "🧭 Methodik"])
+st.markdown(
+    f'<div class="small-note">Version {APP_VERSION} · {data_label} · '
+    f'{history["snapshot_date"].nunique() if not history.empty and "snapshot_date" in history.columns else 0} Historientage</div>',
+    unsafe_allow_html=True,
+)
 
+rank_tab, detail_tab, quality_tab, history_tab, method_tab, backup_tab = st.tabs(
+    ["🏆 Top 100", "🔎 Aktie", "🧪 Datenqualität", "🕘 Historie", "🧭 Methodik", "💾 Backup"]
+)
+
+# ---------------------------------------------------------------------------
+# Top 100
+# ---------------------------------------------------------------------------
 with rank_tab:
-    st.subheader("Weltweite Top 100")
+    st.subheader("Weltweite Top 100 nach aktuellem Research-Modell")
     if mode == "Demo":
-        st.warning("Demo-Modus: Unternehmen, Preise und Kennzahlen sind synthetisch.")
+        st.warning("Demo-Modus: Firmen und Kennzahlen sind synthetisch.")
 
     f1, f2 = st.columns([2, 1])
     query = f1.text_input("Suche", placeholder="Ticker oder Unternehmen", label_visibility="collapsed")
@@ -274,36 +407,43 @@ with rank_tab:
         filtered_top = filtered_top[names.str.contains(q, regex=False) | symbols.str.contains(q, regex=False)]
 
     filter_cols = st.columns(2)
-    trend_options = sorted([x for x in filtered_top.get("trend", pd.Series(dtype=str)).dropna().unique().tolist()])
-    focus_options = sorted([x for x in filtered_top.get("research_focus", pd.Series(dtype=str)).dropna().unique().tolist()])
-    trend_filter = filter_cols[0].multiselect("Trend filtern", trend_options, placeholder="Alle Trends")
-    focus_filter = filter_cols[1].multiselect("Research-Fokus", focus_options, placeholder="Alle Setups")
+    trend_options = sorted(filtered_top.get("trend", pd.Series(dtype=str)).dropna().unique().tolist())
+    focus_options = sorted(filtered_top.get("research_focus", pd.Series(dtype=str)).dropna().unique().tolist())
+    trend_filter = filter_cols[0].multiselect("Trend", trend_options, placeholder="Alle")
+    focus_filter = filter_cols[1].multiselect("Research-Fokus", focus_options, placeholder="Alle")
     if trend_filter:
         filtered_top = filtered_top[filtered_top["trend"].isin(trend_filter)]
     if focus_filter:
         filtered_top = filtered_top[filtered_top["research_focus"].isin(focus_filter)]
 
-    if view == "Tabelle":
+    if filtered_top.empty:
+        st.info("Mit den aktuellen Filtern gibt es noch keine ausreichend vollständigen Kandidaten.")
+    elif view == "Tabelle":
         display = pd.DataFrame({
             "Rang": filtered_top["rank"],
             "Ticker": filtered_top["symbol"],
             "Unternehmen": safe_series(filtered_top, "name").fillna(filtered_top["symbol"]),
+            "Land": safe_series(filtered_top, "country").fillna(""),
             "Score": filtered_top["score_total"].round(1),
+            "Ranking-Score": filtered_top["ranking_score"].round(1),
+            "Confidence": pd.to_numeric(filtered_top.get("data_confidence"), errors="coerce").round(0),
             "Trend": filtered_top["trend"],
             "Score Δ": filtered_top["score_delta"].round(1),
             "Rang Δ": filtered_top["rank_delta"].round(0),
             "Einstieg-Setup": filtered_top["entry_setup_score"].round(0),
             "These-Risiko": filtered_top["thesis_risk_score"].round(0),
+            "Exit-Watch": filtered_top["exit_watch"],
             "Research-Fokus": filtered_top["research_focus"],
             "Bewertung": filtered_top["valuation_band"],
-            "Kurs-Trend": filtered_top["technical_trend"],
             "ROIC": safe_series(filtered_top, "returnOnInvestedCapitalTTM").map(pct),
             "FCF Yield": safe_series(filtered_top, "freeCashFlowYieldTTM").map(pct),
+            "DCF MoS": safe_series(filtered_top, "dcf_margin_of_safety").map(pct),
             "EPS-Wachstum": safe_series(filtered_top, "epsGrowth").map(pct),
             "Net Debt/EBITDA": safe_series(filtered_top, "netDebtToEBITDATTM").map(multiple),
             "KGV": safe_series(filtered_top, "priceToEarningsRatioTTM").map(multiple),
+            "Quellen": safe_series(filtered_top, "fundamental_sources").fillna(""),
         })
-        st.dataframe(display, hide_index=True, use_container_width=True, height=650)
+        st.dataframe(display, hide_index=True, use_container_width=True, height=680)
     else:
         page_size = 20
         pages = max(1, int(np.ceil(len(filtered_top) / page_size)))
@@ -312,18 +452,20 @@ with rank_tab:
         for _, row in page_df.iterrows():
             with st.container(border=True):
                 left, right = st.columns([3, 1])
-                name = row.get("name", row["symbol"])
-                left.markdown(f"**#{int(row['rank'])} · {row['symbol']} · {name}**")
-                left.caption(f"{row['trend']} · {row['research_focus']} · Bewertung: {row['valuation_band']}")
-                right.metric("Score", f"{row['score_total']:.1f}", delta=signed(row.get("score_delta")))
+                left.markdown(f"**#{int(row['rank'])} · {row['symbol']} · {row.get('name', row['symbol'])}**")
+                left.caption(
+                    f"{row.get('country','')} · {row['trend']} · {row['research_focus']} · "
+                    f"Bewertung: {row['valuation_band']} · Quellen: {row.get('fundamental_sources','—')}"
+                )
+                right.metric("Ranking", f"{row['ranking_score']:.1f}", delta=signed(row.get("score_delta")))
                 a, b, c = st.columns(3)
-                a.metric("Einstieg-Setup", f"{row['entry_setup_score']:.0f}/100")
+                a.metric("Einstieg", f"{row['entry_setup_score']:.0f}/100")
                 b.metric("These-Risiko", f"{row['thesis_risk_score']:.0f}/100")
-                c.metric("Rang Δ", signed(row.get("rank_delta")))
+                c.metric("Confidence", f"{row.get('data_confidence', np.nan):.0f}%")
                 st.caption(
                     f"ROIC {pct(row.get('returnOnInvestedCapitalTTM'))} · FCF Yield {pct(row.get('freeCashFlowYieldTTM'))} · "
-                    f"EPS {pct(row.get('epsGrowth'))} · Net Debt/EBITDA {multiple(row.get('netDebtToEBITDATTM'))} · "
-                    f"KGV {multiple(row.get('priceToEarningsRatioTTM'))}"
+                    f"DCF MoS {pct(row.get('dcf_margin_of_safety'))} · EPS {pct(row.get('epsGrowth'))} · "
+                    f"KGV {multiple(row.get('priceToEarningsRatioTTM'))} · Exit-Watch: {row['exit_watch']}"
                 )
 
     st.download_button(
@@ -334,202 +476,253 @@ with rank_tab:
         use_container_width=True,
     )
 
+# ---------------------------------------------------------------------------
+# Detail
+# ---------------------------------------------------------------------------
 with detail_tab:
-    if top100.empty:
-        st.info("Keine Aktien erfüllen die aktuellen Filter.")
+    if scored.empty:
+        st.info("Noch keine Aktie erfüllt die Datenfilter. Datenquellen weiter ergänzen oder Schwellen vorübergehend senken.")
     else:
-        labels = {f"#{int(r['rank'])} · {r['symbol']} · {r.get('name', r['symbol'])}": i for i, r in top100.iterrows()}
+        labels = {
+            f"#{int(r['rank'])} · {r['symbol']} · {r.get('name', r['symbol'])}": i
+            for i, r in scored.head(max(TOP_N, 300)).iterrows()
+        }
         label = st.selectbox("Aktie auswählen", list(labels.keys()))
-        row = top100.loc[labels[label]]
-        currency = str(row.get("currency", "") or "")
+        row = scored.loc[labels[label]]
+        currency = str(row.get("price_currency", row.get("currency", "")) or "")
 
         st.subheader(f"{row.get('name', row['symbol'])} ({row['symbol']})")
-        st.caption(f"{row['trend']} · {row['research_focus']} · Datenvollständigkeit {row['data_completeness']:.0f}%")
+        st.caption(
+            f"{row.get('country','')} · {row.get('sector','')} · Quellen {row.get('fundamental_sources','—')} · "
+            f"Data Confidence {row.get('data_confidence', np.nan):.0f}%"
+        )
 
         a, b, c, d = st.columns(4)
         a.metric("Gesamtscore", f"{row['score_total']:.1f}/100", delta=signed(row.get("score_delta")))
         b.metric("Einstieg-Setup", f"{row['entry_setup_score']:.0f}/100")
         c.metric("These-Risiko", f"{row['thesis_risk_score']:.0f}/100")
         d.metric("Rang", f"#{int(row['rank'])}", delta=signed(row.get("rank_delta")))
+        st.caption(f"Confidence-adjustierter Ranking-Score: **{row.get('ranking_score', np.nan):.1f}/100**. Der Fundamentalscore bleibt davon getrennt sichtbar.")
 
-        st.markdown("#### Entscheidungsbausteine")
+        st.markdown("#### Qualität & Wachstum")
+        a, b, c, d = st.columns(4)
+        a.metric("ROIC", pct(row.get("returnOnInvestedCapitalTTM")))
+        b.metric("Operative Marge", pct(row.get("operatingProfitMarginTTM")))
+        c.metric("Umsatzwachstum", pct(row.get("revenueGrowth")))
+        d.metric("EPS-Wachstum", pct(row.get("epsGrowth")))
+        e, f, g, h = st.columns(4)
+        e.metric("FCF-Marge", pct(row.get("fcfMarginTTM")))
+        f.metric("FCF-Wachstum", pct(row.get("fcfGrowth")))
+        g.metric("FCF Yield", pct(row.get("freeCashFlowYieldTTM")))
+        h.metric("Verwässerung", pct(row.get("sharesGrowth")))
+
+        st.markdown("#### Bewertung & Reverse-DCF-Proxy")
+        a, b, c, d = st.columns(4)
+        a.metric("KGV", multiple(row.get("priceToEarningsRatioTTM")))
+        b.metric("EV / EBITDA", multiple(row.get("enterpriseValueMultipleTTM")))
+        c.metric("DCF Margin of Safety", pct(row.get("dcf_margin_of_safety")))
+        d.metric("Implizites FCF-Wachstum 10J", pct(row.get("implied_fcf_growth_10y")))
+        z = row.get("valuation_zscore", np.nan)
+        if pd.notna(z):
+            st.caption(
+                f"Historischer Bewertungs-Kontext: P/E-Z-Score {float(z):+.2f}; "
+                f"5J-Median {multiple(row.get('pe_5y_median'))}. Negativer Z-Score = unter eigener Historie."
+            )
+        st.caption(
+            "DCF-Proxy: heutiger FCF Yield als Ausgangspunkt, 10 Jahre, 10% Diskontsatz und 2,5% Terminalwachstum. "
+            "Das ist ein Szenario-Tool, kein objektiver fairer Wert."
+        )
+
+        st.markdown("#### Bilanz & Kursstruktur")
+        a, b, c, d = st.columns(4)
+        a.metric("Net Debt / EBITDA", multiple(row.get("netDebtToEBITDATTM")))
+        b.metric("Current Ratio", multiple(row.get("currentRatioTTM")))
+        c.metric("Kurs", price(row.get("price"), currency))
+        d.metric("52W Hoch Abstand", pct(row.get("distance_52w_high")))
+        e, f, g, h = st.columns(4)
+        e.metric("50-Tage-Linie", price(row.get("priceAvg50"), currency))
+        f.metric("200-Tage-Linie", price(row.get("priceAvg200"), currency))
+        g.metric("6M", pct(row.get("return6m")))
+        h.metric("12M", pct(row.get("return12m")))
+        st.caption(f"Technischer Kontext: **{row['technical_trend']}**. Fundamentaldaten haben im Modell Vorrang.")
+
+        st.markdown("#### Einstieg & Exit-Watch")
+        left, right = st.columns(2)
+        with left:
+            if row.get("research_focus") == "Einstieg analysieren":
+                st.success(f"Research-Fokus: **{row['research_focus']}**")
+            elif "Daten" in str(row.get("research_focus")):
+                st.info(f"Research-Fokus: **{row['research_focus']}**")
+            else:
+                st.warning(f"Research-Fokus: **{row['research_focus']}**")
+        with right:
+            if row.get("exit_watch") == "Keine starke Warnung":
+                st.success(f"Exit-Watch: **{row['exit_watch']}**")
+            else:
+                st.warning(f"Exit-Watch: **{row['exit_watch']}**")
+        st.caption(f"These-Monitor: {row.get('thesis_flags', '—')}")
+
+        st.markdown("#### Score-Aufteilung")
         score_table = pd.DataFrame({
-            "Bereich": ["Qualität", "Wachstum", "Free Cashflow", "Bilanz", "Kapitalallokation", "Moat-Proxy", "Bewertung", "Risiko"],
+            "Bereich": ["Qualität", "Wachstum", "Cashflow", "Bilanz", "Kapitalallokation", "Moat-Proxy", "Bewertung", "Risiko"],
             "Punkte": [row["score_quality"], row["score_growth"], row["score_cashflow"], row["score_balance"], row["score_capital_allocation"], row["score_moat"], row["score_valuation"], row["score_risk"]],
             "Maximum": [20, 15, 15, 10, 10, 10, 15, 5],
         })
         score_table["Erfüllung %"] = score_table["Punkte"] / score_table["Maximum"] * 100
         st.bar_chart(score_table.set_index("Bereich")["Erfüllung %"], horizontal=True)
 
-        a, b, c, d = st.columns(4)
-        a.metric("ROIC", pct(row.get("returnOnInvestedCapitalTTM")))
-        b.metric("FCF Yield", pct(row.get("freeCashFlowYieldTTM")))
-        c.metric("FCF-Wachstum", pct(row.get("fcfGrowth")))
-        d.metric("EPS-Wachstum", pct(row.get("epsGrowth")))
-        e, f, g, h = st.columns(4)
-        e.metric("FCF-Marge", pct(row.get("fcfMarginTTM")))
-        f.metric("Net Debt / EBITDA", multiple(row.get("netDebtToEBITDATTM")))
-        g.metric("KGV", multiple(row.get("priceToEarningsRatioTTM")))
-        h.metric("Verwässerung", pct(row.get("sharesGrowth")))
+        st.markdown("#### Datenherkunft")
+        prov = provenance_table(row)
+        prov["Wert"] = pd.to_numeric(prov["Wert"], errors="coerce")
+        st.dataframe(prov, hide_index=True, use_container_width=True)
 
-        if pd.notna(row.get("price")):
-            st.markdown("#### Kursstruktur")
-            a, b, c, d = st.columns(4)
-            a.metric("Kurs", price(row.get("price"), currency))
-            b.metric("50-Tage-Linie", price(row.get("priceAvg50"), currency))
-            c.metric("200-Tage-Linie", price(row.get("priceAvg200"), currency))
-            d.metric("52W Hoch Abstand", pct(row.get("distance_52w_high")))
-            st.caption(f"Technischer Kontext: **{row['technical_trend']}**. Er dient nur als Timing-/Risikokontext und ersetzt keine Fundamentalanalyse.")
+        # Optional analyst context from Yahoo; never part of the fundamental score.
+        if pd.notna(row.get("targetMeanPrice")) or pd.notna(row.get("analystCount")):
+            st.markdown("#### Analystenkontext (optional, nicht im Hauptscore)")
+            a, b, c = st.columns(3)
+            a.metric("Mittleres Kursziel", price(row.get("targetMeanPrice"), currency))
+            b.metric("Analysten", f"{row.get('analystCount', np.nan):.0f}" if pd.notna(row.get("analystCount")) else "—")
+            c.metric("Recommendation Mean", f"{row.get('recommendationMean', np.nan):.2f}" if pd.notna(row.get("recommendationMean")) else "—")
 
-        st.markdown("#### These-Monitor")
-        if row.get("thesis_risk_score", 0) >= 60:
-            st.error(f"Erhöhtes These-Risiko: {row['thesis_flags']}")
-        elif row.get("thesis_risk_score", 0) >= 35:
-            st.warning(f"Beobachtung nötig: {row['thesis_flags']}")
-        else:
-            st.success(f"Aktuell keine starken quantitativen These-Brüche: {row['thesis_flags']}")
-        if row.get("red_flag_penalty", 0) > 0:
-            st.caption(f"Red-Flag-Abzug im Hauptscore: {row['red_flag_penalty']:.1f} Punkte.")
+        if mode == "Live kostenlos":
+            if st.button("Diese Aktie kostenlos vertiefen (Yahoo Statements)", use_container_width=True):
+                try:
+                    with st.spinner("Jahresabschlüsse werden ergänzend geladen …"):
+                        fresh = enrich_yahoo_fundamentals(universe, [str(row["symbol"])], deep=True, workers=1)
+                        yahoo_cache = upsert_cache(yahoo_cache, fresh)
+                        save_cache(yahoo_cache, PATHS["yahoo"])
+                    st.success("Deep-Dive-Daten gespeichert. App wird neu geladen.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Deep-Dive fehlgeschlagen: {exc}")
 
-        # Show what changed versus the previous fundamental snapshot.
-        if pd.notna(row.get("prev_score_total")):
-            st.markdown("#### Veränderung zum vorherigen Snapshot")
-            change_rows = []
-            for title, cur_col, prev_col in [
-                ("Gesamtscore", "score_total", "prev_score_total"),
-                ("Qualität", "score_quality", "prev_score_quality"),
-                ("Wachstum", "score_growth", "prev_score_growth"),
-                ("Cashflow", "score_cashflow", "prev_score_cashflow"),
-                ("Bewertung", "score_valuation", "prev_score_valuation"),
-                ("Red-Flag-Abzug", "red_flag_penalty", "prev_red_flag_penalty"),
-            ]:
-                if prev_col in row.index and pd.notna(row.get(prev_col)):
-                    change_rows.append({"Bereich": title, "Vorher": row.get(prev_col), "Aktuell": row.get(cur_col), "Δ": row.get(cur_col) - row.get(prev_col)})
-            if change_rows:
-                st.dataframe(pd.DataFrame(change_rows).round(1), hide_index=True, use_container_width=True)
+# ---------------------------------------------------------------------------
+# Data quality / diagnostics
+# ---------------------------------------------------------------------------
+with quality_tab:
+    st.subheader("Abdeckung & Datenvertrauen")
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric("Rankingstatus", str(coverage.get("status", "—")))
+    q2.metric("≥60 Confidence", f"{int(coverage.get('eligible_60', 0)):,}".replace(",", "."))
+    q3.metric("Gesamt-Abdeckung", f"{float(coverage.get('coverage_pct', 0)):.1f}%")
+    q4.metric("Nicht-US-Abdeckung", f"{float(coverage.get('non_us_coverage_pct', 0)):.1f}%")
 
-        if mode != "Demo" and api_key:
-            if st.button("Aktuelle Analysten-/Kurskontextdaten laden", use_container_width=True):
-                bundle = cached_detail_bundle(api_key, str(row["symbol"]))
-                profile = bundle["profile"]
-                estimates = bundle["estimates"]
-                changes = bundle["price_change"]
-                targets = bundle["price_target"]
-                grades = bundle["grades"]
+    if mode != "Demo":
+        providers = pd.DataFrame({
+            "Quelle": ["iShares ACWI", "SEC EDGAR", "Finnhub", "Yahoo Fundamentals", "Yahoo Kurse"],
+            "Cache-Zeilen": [len(universe), len(sec_cache), len(finnhub_cache), len(yahoo_cache), len(price_cache)],
+            "Rolle": [
+                "Weltweites Aktienuniversum",
+                "Offizielle US-XBRL-Fundamentals",
+                "Globale Basic Financials / Ratios",
+                "Best-Effort Fundamentals + Analystenkontext",
+                "Kurs, 50/200T, 52W, Momentum",
+            ],
+        })
+        st.dataframe(providers, hide_index=True, use_container_width=True)
 
-                if not profile.empty:
-                    st.markdown("##### Unternehmensprofil")
-                    cols = [c for c in ["companyName", "sector", "industry", "country", "exchange", "price", "marketCap", "description"] if c in profile.columns]
-                    st.dataframe(profile[cols], hide_index=True, use_container_width=True)
-                if not changes.empty:
-                    st.markdown("##### Kursperformance")
-                    cols = [c for c in ["1D", "5D", "1M", "3M", "6M", "ytd", "1Y", "3Y", "5Y"] if c in changes.columns]
-                    if cols:
-                        perf = changes[cols].T.reset_index()
-                        perf.columns = ["Zeitraum", "Veränderung %"]
-                        st.dataframe(perf, hide_index=True, use_container_width=True)
-                if not estimates.empty:
-                    st.markdown("##### Analystenschätzungen")
-                    cols = [c for c in ["date", "revenueAvg", "epsAvg", "numAnalystsRevenue", "numAnalystsEps"] if c in estimates.columns]
-                    st.dataframe(estimates[cols].sort_values("date"), hide_index=True, use_container_width=True)
-                if not targets.empty:
-                    st.markdown("##### Analysten-Kurszielkonsens")
-                    st.caption("Externer Konsens, kein Bestandteil des Hauptscores.")
-                    st.dataframe(targets, hide_index=True, use_container_width=True)
-                if not grades.empty:
-                    st.markdown("##### Analysten-Rating-Verteilung")
-                    st.caption("Externer Sentiment-Kontext, kein Bestandteil des Hauptscores.")
-                    st.dataframe(grades, hide_index=True, use_container_width=True)
+    if not raw.empty and "country" in raw.columns:
+        tmp = raw.copy()
+        tmp["_confidence"] = pd.to_numeric(tmp.get("data_confidence"), errors="coerce").fillna(0)
+        country_cov = tmp.groupby("country", dropna=False).agg(
+            Aktien=("symbol", "count"),
+            Ausreichend=("_confidence", lambda s: int((s >= 60).sum())),
+            Median_Confidence=("_confidence", "median"),
+        ).reset_index()
+        country_cov["Abdeckung %"] = (country_cov["Ausreichend"] / country_cov["Aktien"] * 100).round(1)
+        country_cov = country_cov.sort_values("Aktien", ascending=False).head(30)
+        st.markdown("#### Abdeckung nach Land")
+        st.dataframe(country_cov, hide_index=True, use_container_width=True)
 
+    st.info(
+        "Data Confidence bewertet **Vollständigkeit + Quellenqualität + Kursverfügbarkeit**. "
+        "Eine hohe Kennzahl macht die Daten nicht fehlerfrei, verhindert aber, dass sehr unvollständige Aktien im Ranking zu viel Gewicht bekommen."
+    )
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
 with history_tab:
     st.subheader("Veränderungshistorie")
     if history.empty:
-        st.info("Noch keine gespeicherte Historie. Ein neuer Live-Abruf legt den ersten täglichen Snapshot an.")
+        st.info("Noch kein historischer Snapshot vorhanden. Nach Datenaktualisierungen wird täglich ein Ranking-Snapshot gespeichert.")
     else:
-        dates = sorted(history["snapshot_date"].dropna().astype(str).unique().tolist())
-        st.caption(f"Gespeichert: {dates[0]} bis {dates[-1]} · {len(dates)} Snapshot-Tage · Top 300 je Tag")
-
-        hist_symbols = history["symbol"].dropna().astype(str).unique().tolist()
-        default_symbol = str(top100.iloc[0]["symbol"]) if not top100.empty else hist_symbols[0]
-        idx = hist_symbols.index(default_symbol) if default_symbol in hist_symbols else 0
-        hist_symbol = st.selectbox("Aktie in Historie", hist_symbols, index=idx)
-        hdf = symbol_history(history, hist_symbol)
-
-        if not hdf.empty:
-            if "score_total" in hdf.columns:
-                chart = hdf[["snapshot_date", "score_total"]].dropna().set_index("snapshot_date")
-                st.markdown("##### Gesamtscore")
-                st.line_chart(chart)
-            if "history_rank" in hdf.columns:
-                st.markdown("##### Globaler Rang (kleiner ist besser)")
-                st.line_chart(hdf[["snapshot_date", "history_rank"]].dropna().set_index("snapshot_date"))
-
-            component_cols = [c for c in ["score_quality", "score_growth", "score_cashflow", "score_balance", "score_valuation"] if c in hdf.columns]
-            if component_cols:
-                st.markdown("##### Teil-Scores")
-                normalized = hdf[["snapshot_date"] + component_cols].copy()
-                max_map = {"score_quality": 20, "score_growth": 15, "score_cashflow": 15, "score_balance": 10, "score_valuation": 15}
-                for c in component_cols:
-                    normalized[c] = pd.to_numeric(normalized[c], errors="coerce") / max_map[c] * 100
-                st.line_chart(normalized.set_index("snapshot_date"))
-
-            cols = [c for c in ["snapshot_date", "history_rank", "score_total", "returnOnInvestedCapitalTTM", "freeCashFlowYieldTTM", "epsGrowth", "fcfGrowth", "netDebtToEBITDATTM", "priceToEarningsRatioTTM", "red_flag_penalty"] if c in hdf.columns]
-            st.dataframe(hdf[cols].sort_values("snapshot_date", ascending=False), hide_index=True, use_container_width=True)
-
-        movers = top100.dropna(subset=["score_delta"]).copy() if "score_delta" in top100.columns else pd.DataFrame()
-        if not movers.empty:
-            st.markdown("##### Größte Veränderungen seit dem vorherigen Snapshot")
-            movers = movers.reindex(movers["score_delta"].abs().sort_values(ascending=False).index).head(15)
-            st.dataframe(
-                pd.DataFrame({
-                    "Ticker": movers["symbol"],
-                    "Unternehmen": safe_series(movers, "name").fillna(movers["symbol"]),
-                    "Trend": movers["trend"],
-                    "Score": movers["score_total"].round(1),
-                    "Score Δ": movers["score_delta"].round(1),
-                    "Rang Δ": movers["rank_delta"].round(0),
-                    "These-Risiko": movers["thesis_risk_score"].round(0),
-                }),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-        history_bytes = history.to_csv(index=False).encode("utf-8")
+        hist_symbols = sorted(history["symbol"].dropna().astype(str).unique().tolist())
+        default_symbol = str(top100.iloc[0]["symbol"]) if not top100.empty and str(top100.iloc[0]["symbol"]) in hist_symbols else hist_symbols[0]
+        symbol = st.selectbox("Ticker", hist_symbols, index=hist_symbols.index(default_symbol))
+        sh = symbol_history(history, symbol)
+        if not sh.empty:
+            chart_cols = [c for c in ["score_total", "score_quality", "score_growth", "score_cashflow", "score_valuation"] if c in sh.columns]
+            chart = sh.set_index("snapshot_date")[chart_cols].apply(pd.to_numeric, errors="coerce")
+            st.line_chart(chart)
+            if "history_rank" in sh.columns:
+                st.markdown("#### Rangverlauf")
+                rank_chart = sh.set_index("snapshot_date")[["history_rank"]].apply(pd.to_numeric, errors="coerce")
+                st.line_chart(rank_chart)
+            st.dataframe(sh.tail(30), hide_index=True, use_container_width=True)
         st.download_button(
             "Historie als CSV sichern",
-            data=history_bytes,
-            file_name=f"stock_ranker_history_{datetime.now().date().isoformat()}.csv",
+            data=history.to_csv(index=False).encode("utf-8"),
+            file_name="ranking_history.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
-with methodology_tab:
-    st.subheader("Wie die App entscheidet")
+# ---------------------------------------------------------------------------
+# Methodology
+# ---------------------------------------------------------------------------
+with method_tab:
+    st.subheader("Methodik")
     st.markdown(
         """
-Der **100-Punkte-Hauptscore** bleibt fundamental: Qualität (20), Wachstum (15), Free Cashflow (15), Bilanz (10), Kapitalallokation (10), Moat-Proxy (10), Bewertung (15) und Risiko (5). Harte Red Flags ziehen Punkte ab.
+**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt; Yahoo/yfinance dient als kostenlose Fallback-Quelle sowie für Kurs- und Trenddaten.
 
-Zusätzlich gibt es drei getrennte Entscheidungsbausteine:
+**100-Punkte-Modell.** Unternehmensqualität 20, Wachstum 15, Free Cashflow 15, Bilanz 10, Kapitalallokation 10, Moat-Proxy 10, Bewertung 15 und Risiko 5 Punkte. Harte Red Flags ziehen Punkte ab. Moat und Management werden ausdrücklich nur über quantitative Proxies angenähert.
 
-- **Einstieg-Setup (0–100):** gewichtet Bewertung und Free Cashflow stärker als der Hauptscore. Es soll verhindern, dass ein hervorragendes Unternehmen automatisch als attraktiver Einstieg gilt.
-- **Trend:** kombiniert die Veränderung des fundamentalen Scores/Rangs mit der Kursstruktur aus Kurs, 50-Tage- und 200-Tage-Linie. Fundamentale Verschlechterung hat Vorrang vor Kursmomentum.
-- **These-Risiko (0–100):** steigt bei schrumpfendem FCF/EPS, ROIC unter 10 %, hoher Verschuldung, deutlicher Verwässerung, negativem FCF, Red Flags oder stark fallendem Score. Das ist ein Frühwarnsystem für eine erneute Analyse der Investmentthese.
+**Einstieg-Setup.** Qualität, Cashflow und Bewertung werden separat kombiniert. Der DCF-Proxy kann den Einstiegsscore nur leicht nach oben oder unten verschieben. Ein guter Kurs-Chart kann eine fundamentale Verschlechterung nicht überstimmen.
 
-Der **Research-Fokus** lautet deshalb nicht einfach „Kaufen/Verkaufen“, sondern z. B. *Einstieg analysieren*, *Qualität gut / Bewertung warten*, *Beobachten* oder *These prüfen*. Das hält die Trennung zwischen Datenlage und tatsächlicher Anlageentscheidung sichtbar.
+**Exit-Watch.** Das System reagiert auf schrumpfenden FCF/EPS/Umsatz, niedrigen ROIC, hohe Verschuldung, Verwässerung, Score-Verfall, anspruchsvolle DCF-Annahmen und die Kombination aus fundamentalem und technischem Abwärtstrend. Es erzeugt bewusst Prüfhinweise statt automatischer Verkaufsorders.
+
+**Reverse DCF.** Aus dem aktuellen FCF Yield wird berechnet, welches langfristige FCF-Wachstum ungefähr erforderlich wäre, um den aktuellen Preis unter den Modellannahmen zu rechtfertigen. Niedrigere implizite Erwartungen sind grundsätzlich leichter zu erfüllen als sehr hohe.
+
+**Rankingstatus.** Solange ein großer Teil der internationalen Aktien noch keine ausreichende Fundamentalabdeckung besitzt, wird das globale Ranking als *vorläufig* markiert. Das verhindert falsche Präzision.
         """
     )
-    st.markdown("#### Was für Kaufentscheidungen zusätzlich sinnvoll ist")
-    st.write(
-        "Einstieg-Setup, FCF Yield, ROIC, Verschuldung, Verwässerung, Bewertung, 52-Wochen-Kontext und Trendbestätigung. "
-        "Bei Detailaufruf können außerdem Analystenschätzungen, Kursperformance und Kurszielkonsens als externer Kontext geladen werden."
+
+# ---------------------------------------------------------------------------
+# Backup / restore
+# ---------------------------------------------------------------------------
+with backup_tab:
+    st.subheader("Backup für Streamlit Cloud")
+    st.caption(
+        "Community-Cloud kann lokalen Speicher bei Neustarts zurücksetzen. Sichere deshalb gelegentlich die komplette Datenbasis als ZIP und spiele sie bei Bedarf wieder ein."
     )
-    st.markdown("#### Was für Verkaufs-/These-Entscheidungen sinnvoll ist")
-    st.write(
-        "Nicht der Kursrückgang allein, sondern These-Brüche: fallender ROIC, schrumpfender FCF/EPS, steigende Verschuldung, Verwässerung, "
-        "negative Cashflows, steigende Red-Flag-Abzüge und ein dauerhaft sinkender Hauptscore."
+    backup_bytes = build_backup_zip()
+    st.download_button(
+        "Komplettes Daten-Backup herunterladen",
+        data=backup_bytes,
+        file_name=f"global_stock_ranker_backup_{datetime.now().date().isoformat()}.zip",
+        mime="application/zip",
+        use_container_width=True,
     )
-    st.info(
-        "Die Historie speichert standardmäßig die Top 300 des globalen Fundamentalrankings für bis zu 365 Tage. "
-        "Auf Streamlit Community Cloud ist der lokale Dateispeicher nicht als dauerhafte Datenbank gedacht; deshalb gibt es Import/Export. "
-        "Für eine dauerhaft produktive Version kann HISTORY_PATH auf persistenten Speicher zeigen oder später eine Datenbank angebunden werden."
-    )
+
+    upload = st.file_uploader("Backup-ZIP wiederherstellen", type=["zip"])
+    if upload is not None and st.button("Backup wiederherstellen", use_container_width=True):
+        try:
+            restored = restore_backup(upload)
+            st.success("Wiederhergestellt: " + ", ".join(restored))
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Backup konnte nicht wiederhergestellt werden: {exc}")
+
+    st.markdown("#### Alternative: einzelne Historie importieren")
+    history_upload = st.file_uploader("Historie CSV / CSV.GZ", type=["csv", "gz"], key="history_import")
+    if history_upload is not None and st.button("Historie zusammenführen", use_container_width=True):
+        try:
+            imported = import_cache_bytes(history_upload)
+            merged = merge_imported_history(load_history(PATHS["history"]), imported)
+            merged.to_csv(PATHS["history"], index=False, compression="gzip")
+            st.success(f"{len(imported)} Historienzeilen importiert.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Historie konnte nicht importiert werden: {exc}")

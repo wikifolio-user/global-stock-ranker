@@ -1,233 +1,114 @@
-# Global Stock Ranker – iPhone ohne Terminal
+# Global Stock Ranker 3.0 – kostenlos, weltweit, ohne Terminal
 
-Diese Edition ist absichtlich flach aufgebaut. Alle wichtigen Dateien liegen direkt im Hauptordner des GitHub-Repositories. Du brauchst weder Terminal noch Codespaces.
+Diese Version ersetzt FMP vollständig. Sie kombiniert mehrere kostenlose Quellen und ist so aufgebaut, dass du die Dateien direkt auf dem iPhone in GitHub anlegen oder ersetzen kannst.
 
-## Dateien, die in GitHub liegen müssen
+## Datenquellen
 
-1. `app.py` – Oberfläche und Seiten der App
-2. `settings.py` – **deine wichtigste Anpassungsdatei** für Schwellen, Gewichte und Top-N
-3. `scoring.py` – 100-Punkte-Fundamentalscore
-4. `signals.py` – Einstieg-Setup, Trend, These-Risiko und Research-Fokus
-5. `history.py` – tägliche Veränderungshistorie
-6. `fmp.py` – Verbindung zum Finanzdatenanbieter FMP
-7. `demo.py` – Demo-Daten ohne API-Key
-8. `requirements.txt` – Python-Abhängigkeiten für Streamlit Cloud
+- **iShares MSCI ACWI**: offizielles weltweites Large-/Mid-Cap-Universum.
+- **SEC EDGAR**: offizielle kostenlose US-XBRL-Fundamentaldaten ohne API-Key.
+- **Finnhub Basic Financials**: kostenlose globale Ratios/Kennzahlen mit Free-Key.
+- **Yahoo/yfinance**: kostenlose Kurs-/Trenddaten und Best-Effort-Fallback für Fundamentals.
+- **Eigene Historie**: Score-, Rang- und These-Veränderungen werden in der App gespeichert.
 
-`CHANGELOG.md` und `VERSION.txt` sind optional, aber sinnvoll.
+## Dateien, die in dein GitHub-Repository gehören
 
----
+Lege alle folgenden Dateien im Hauptordner deines Repositorys ab:
 
-# A. Erstmalige Einrichtung nur mit dem iPhone
+- `app.py`
+- `settings.py`
+- `universe.py`
+- `data_sources.py`
+- `pipeline.py`
+- `scoring.py`
+- `signals.py`
+- `history.py`
+- `demo.py`
+- `requirements.txt`
 
-## 1. Dateien in die iPhone-App „Dateien“ laden
+Die README und CHANGELOG sind optional.
 
-Lade die ZIP `global_stock_ranker_iphone_no_terminal.zip` aus ChatGPT herunter.
+## iPhone: Dateien ohne Terminal in GitHub anlegen
 
-Öffne danach auf dem iPhone:
+1. Öffne dein GitHub-Repository in Safari.
+2. Tippe auf **Add file** → **Create new file**.
+3. Gib als Dateinamen z. B. `app.py` ein.
+4. Öffne parallel die passende Datei aus dem Ordner `copy_text` dieses Pakets.
+5. Alles markieren → kopieren → in GitHub einfügen.
+6. Unten **Commit changes**.
+7. Wiederhole das für die Dateien oben.
 
-**Dateien → Downloads → global_stock_ranker_iphone_no_terminal.zip**
+Wenn bereits eine Datei existiert: Datei öffnen → Stift-Symbol → gesamten Inhalt ersetzen → **Commit changes**.
 
-Tippe einmal auf die ZIP. iOS erstellt daneben automatisch einen entpackten Ordner.
+## Streamlit Secrets
 
-## 2. GitHub-Repository anlegen
+Öffne in Streamlit Cloud deine App → **Settings** → **Secrets**.
 
-Öffne `github.com` in Safari und melde dich an.
-
-Erstelle ein neues Repository, zum Beispiel:
-
-`global-stock-ranker`
-
-Private oder Public funktioniert. Wenn es Private ist, musst du Streamlit später Zugriff auf private Repositories erlauben.
-
-## 3. Dateien ohne Terminal hochladen
-
-Öffne dein Repository in Safari.
-
-Wähle:
-
-**Add file → Upload files**
-
-Tippe auf **choose your files** und wähle in der iPhone-Dateiauswahl die entpackten Dateien aus.
-
-Lade mindestens diese acht Dateien hoch:
-
-- app.py
-- settings.py
-- scoring.py
-- signals.py
-- history.py
-- fmp.py
-- demo.py
-- requirements.txt
-
-Danach unten **Commit changes** bestätigen.
-
-Wenn Safari nicht mehrere Dateien auf einmal komfortabel auswählen lässt, lade sie nacheinander hoch.
-
----
-
-# B. Streamlit Cloud veröffentlichen
-
-1. Öffne `share.streamlit.io` in Safari.
-2. Melde dich mit GitHub an.
-3. Wähle **Create app**.
-4. Wähle dein Repository `global-stock-ranker`.
-5. Branch: `main`.
-6. Main file path: `app.py`.
-7. Öffne **Advanced settings**.
-8. Im Feld **Secrets** kannst du deinen FMP-Key sicher hinterlegen:
+Empfohlen:
 
 ```toml
-FMP_API_KEY = "DEIN_API_KEY"
+FINNHUB_API_KEY = "DEIN_KOSTENLOSER_FINNHUB_KEY"
+SEC_USER_AGENT = "Vorname Nachname deine@email.de"
 ```
 
-9. Speichern und **Deploy** wählen.
+`FINNHUB_API_KEY` ist kostenlos, aber optional. Ohne ihn kann Yahoo als Fallback verwendet werden.
 
-Wichtig: Den echten API-Key niemals in `app.py`, `settings.py` oder eine andere GitHub-Datei schreiben.
+`SEC_USER_AGENT` ist kein Schlüssel. Die SEC erwartet bei automatisierten Abrufen einen identifizierbaren User-Agent mit Kontaktmöglichkeit. Er wird nur beim Abruf von SEC-Daten als HTTP-Header verwendet.
 
----
+## Erster Aufbau des kostenlosen Datensatzes
 
-# C. App wie eine iPhone-App benutzen
+In der App links das Seitenmenü öffnen und dann:
 
-Öffne deine `*.streamlit.app`-Adresse in Safari.
+1. **Weltuniversum aktualisieren** – lädt die aktuellen ACWI-Positionen.
+2. **Kurs & Trend aktualisieren** – zuerst z. B. Top 500; später Global.
+3. **SEC-US-Fundamentals aktualisieren** – füllt große Teile der USA in einem Bulk-Lauf.
+4. **Fehlende Fundamentals ergänzen** – Finnhub auswählen und z. B. 100 Aktien pro Lauf.
 
-Dann:
+Die App priorisiert bei der internationalen Ergänzung zunächst Nicht-US-Aktien und die größten ACWI-Gewichte. Wiederhole Schritt 4 über mehrere Sitzungen, bis der Rankingstatus von **Vorläufig** Richtung **Global belastbar** geht.
 
-**Teilen → Zum Home-Bildschirm → Hinzufügen**
+## Warum schrittweise?
 
-Damit erscheint der Stock Ranker als eigenes Icon auf deinem iPhone.
+Kostenlose APIs haben Limits. Statt diese zu umgehen, speichert die App bereits geladene Kennzahlen und ergänzt nur fehlende Aktien. So entsteht mit der Zeit eine globale Datenbasis ohne kostenpflichtiges FMP-Ultimate-Abo.
 
----
+## Ranking und neue professionelle Funktionen
 
-# D. Spätere Änderungen ohne Terminal
+Die App enthält:
 
-Das ist der wichtigste Teil dieser Edition.
+- 100-Punkte-Fundamentalscore
+- Data Confidence 0–100
+- Feldbezogene Datenherkunft SEC / Finnhub / Yahoo
+- Einstieg-Setup 0–100
+- These-Risiko 0–100
+- Exit-Watch
+- Fundamentaltrend
+- 50-/200-Tage-Trend
+- 1M/3M/6M/12M-Momentum
+- 52-Wochen-Abstand
+- DCF Margin-of-Safety-Proxy
+- Reverse-DCF: implizites FCF-Wachstum für 10 Jahre
+- historische P/E-Einordnung, wenn Finnhub sie liefert
+- Veränderungshistorie für Score und Rang
+- Quellen-/Länder-Abdeckungsdiagnostik
+- Backup und Restore der gesamten lokalen Datenbasis als ZIP
 
-## Beste Methode: Datei direkt in GitHub bearbeiten
+## Backup ist wichtig
 
-Beispiel: Du willst den Mindestscore für „Einstieg analysieren“ von 75 auf 80 erhöhen.
+Streamlit Community Cloud garantiert keinen dauerhaft erhaltenen lokalen Dateispeicher. Öffne deshalb gelegentlich den Tab **Backup** und lade ein komplettes Daten-Backup herunter. Nach einem Cloud-Neustart kannst du dieses ZIP wieder hochladen.
 
-1. Öffne dein GitHub-Repository.
-2. Tippe auf `settings.py`.
-3. Tippe auf das **Stift-Symbol / Edit this file**.
-4. Suche in `FOCUS` nach:
+## Wichtige Methodik-Hinweise
 
-```python
-"entry_total_score": 75,
-```
+Banken, Versicherer und REITs werden standardmäßig herausgefiltert, weil FCF-/EV-EBITDA-Modelle dort nicht direkt vergleichbar sind. Du kannst den Filter abschalten, solltest diese Branchen dann aber separat beurteilen.
 
-5. Ändere es zu:
+Yahoo/yfinance ist keine offizielle Yahoo-Finance-API und wird daher nur als Best-Effort-Quelle behandelt. Offizielle SEC-Daten erhalten im Confidence-Modell die höchste Quellenqualität.
 
-```python
-"entry_total_score": 80,
-```
+Der DCF-Wert ist ein Szenario-Proxy mit zentral hinterlegten Annahmen in `settings.py`. Die App erzeugt Research-Hinweise und keine automatischen Orders.
 
-6. Tippe auf **Commit changes**.
+## Spätere Anpassungen
 
-Streamlit erkennt den GitHub-Commit und aktualisiert die veröffentlichte App automatisch.
+Für normale Anpassungen reicht meistens `settings.py`. Dort kannst du Schwellen, DCF-Annahmen, Einstiegskriterien, These-Risiko und Trendregeln verändern.
 
-Du brauchst keinen Terminal-Befehl.
-
----
-
-# E. Welche Datei ändere ich für was?
-
-## `settings.py`
-
-Hier solltest du zuerst suchen. Diese Datei ist bewusst für einfache Änderungen gedacht.
-
-Dort kannst du ändern:
-
-- Anzahl Top-Aktien
-- Länge der Historie
-- Mindest-Marktkapitalisierung
-- Mindest-Datenvollständigkeit
-- Schwellen für hohe Analysepriorität
-- Gewichtung des Einstieg-Setups
-- Warnschwellen für These-Risiko
-- Bedingungen für „Einstieg analysieren“
-- Bedingungen für „These prüfen“
-- technische 50/200-Tage-Toleranzen
-
-## `scoring.py`
-
-Hier steckt das eigentliche fundamentale 100-Punkte-Modell.
-
-Ändern, wenn du z. B. möchtest:
-
-- ROIC stärker gewichten
-- KGV-Grenzen verändern
-- FCF Yield stärker gewichten
-- Margen-Schwellen ändern
-- Verschuldungsgrenzen ändern
-- zusätzliche Red Flags einbauen
-
-## `signals.py`
-
-Ändern für:
-
-- Trendlogik
-- Einstieg-Setup
-- These-Risiko
-- Research-Fokus
-- zusätzliche Kauf-/Verkaufs-Warnsignale
-
-## `app.py`
-
-Ändern für:
-
-- Texte
-- iPhone-Darstellung
-- neue Tabellen/Spalten
-- Filter
-- Seiten und Buttons
-
-## `history.py`
-
-Ändern für:
-
-- Veränderungshistorie
-- Vergleich zum vorherigen Snapshot
-- Rang- und Score-Verlauf
-
-## `fmp.py`
-
-Nur ändern, wenn sich Daten-Endpunkte ändern oder ein anderer Datenanbieter ergänzt werden soll.
-
----
-
-# F. Copy/Paste statt Datei-Upload
-
-Im Ordner `copy_text` liegt jede wichtige Datei zusätzlich als `.txt` vor.
-
-Beispiel:
-
-`copy_text/settings.py.txt`
-
-Du kannst den kompletten Inhalt öffnen, kopieren und in GitHub in eine Datei namens `settings.py` einfügen.
-
-Das ist besonders praktisch, wenn ich dir später eine überarbeitete einzelne Datei bereitstelle: Du ersetzt dann nur deren Inhalt in GitHub und bestätigst **Commit changes**.
-
----
-
-# G. Empfohlener Änderungsablauf
-
-Für spätere Versionen musst du nicht jedes Mal die ganze App ersetzen.
-
-1. Ich nenne dir die geänderten Dateien.
-2. Du öffnest genau diese Datei(en) in GitHub.
-3. Stift-Symbol antippen.
-4. Alten Inhalt vollständig markieren.
-5. Neuen Inhalt aus meiner `.txt`-Datei kopieren und einfügen.
-6. **Commit changes**.
-7. Streamlit aktualisiert die App.
-
-So bleibt deine Änderungshistorie in GitHub erhalten und du kannst frühere Versionen über die Commit-Historie nachvollziehen.
-
----
-
-# H. Wichtig für die Aktien-Historie
-
-Die App speichert Ranking-Snapshots in ihrem lokalen Speicher und bietet Export/Import der Historie. Bei Cloud-Hosting solltest du die Historie regelmäßig exportieren, da lokaler App-Speicher bei einem Neuaufbau der Cloud-Instanz nicht als dauerhafte Datenbank gedacht ist.
-
-Für eine spätere professionelle Version wäre eine externe Datenbank die sauberere Lösung.
+- `settings.py`: Schwellen und Gewichte
+- `scoring.py`: 100-Punkte-Modell + DCF
+- `signals.py`: Einstieg, Trend, Exit-Watch
+- `data_sources.py`: SEC/Finnhub/Yahoo-Adapter
+- `pipeline.py`: Quellen-Merge, Confidence, Cache
+- `app.py`: Oberfläche
