@@ -136,11 +136,12 @@ def _yahoo_chart_row(symbol: str, provider_symbol: str, period: str = YAHOO_PRIC
     quoteSummary endpoints. This keeps price/trend refreshes independent from the
     frequent 401 ``Invalid Crumb`` failures seen on Streamlit Cloud.
     """
+    attempted_at = _now_iso()
     out: dict[str, Any] = {
         "symbol": symbol,
         "provider_symbol": provider_symbol,
         "price_source": "YAHOO_CHART",
-        "price_updated_at": _now_iso(),
+        "price_attempted_at": attempted_at,
     }
     if not provider_symbol:
         out["provider_error"] = "EMPTY_SYMBOL"
@@ -148,7 +149,7 @@ def _yahoo_chart_row(symbol: str, provider_symbol: str, period: str = YAHOO_PRIC
 
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(str(provider_symbol), safe='')}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; GlobalStockRanker/3.2; personal research app)",
+        "User-Agent": "Mozilla/5.0 (compatible; GlobalStockRanker/3.3; personal research app)",
         "Accept": "application/json,text/plain,*/*",
     }
     params = {
@@ -210,6 +211,7 @@ def _yahoo_chart_row(symbol: str, provider_symbol: str, period: str = YAHOO_PRIC
             out["provider_error"] = "NO_USABLE_PRICE_DATA"
             return out
         out.update(values)
+        out["price_updated_at"] = _now_iso()
         out["provider_error"] = ""
         return out
     except Exception as exc:
@@ -459,11 +461,12 @@ def _annual_series_values(series: dict[str, Any], candidates: list[str]) -> list
 
 
 def fetch_finnhub_basic(symbol: str, provider_symbol: str, api_key: str, timeout: int = 25) -> dict[str, Any]:
+    attempted_at = _now_iso()
     out: dict[str, Any] = {
         "symbol": symbol,
         "provider_symbol": provider_symbol,
         "fundamental_source": "FINNHUB",
-        "fundamental_updated_at": _now_iso(),
+        "fundamental_attempted_at": attempted_at,
     }
     try:
         r = requests.get(
@@ -532,6 +535,8 @@ def fetch_finnhub_basic(symbol: str, provider_symbol: str, api_key: str, timeout
         out["pe_5y_mean"] = mean
         out["pe_5y_median"] = float(np.median(hist_pe))
         out["valuation_zscore"] = (current_pe - mean) / std if std > 1e-9 else np.nan
+    out["fundamental_updated_at"] = _now_iso()
+    out["provider_error"] = ""
     return out
 
 

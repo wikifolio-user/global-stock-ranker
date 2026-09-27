@@ -1,15 +1,9 @@
-# Validation – Version 3.1
+# Validation – Version 3.3
 
-- Python syntax compilation: passed for all application modules and tests.
-- Automated core tests: **7 passed**.
-- Tested areas:
-  - iShares CSV parser and US/Hong-Kong mapping
-  - Regression mappings for London trailing dots (`BP.`, `RR.`, `BA.`)
-  - Australia / France / Denmark / Sweden / Finland / Brazil suffix mapping
-  - Provider precedence / field-level provenance / confidence pipeline
-  - 0–100 scoring, Reverse-DCF proxy, entry score, thesis risk and exit-watch bounds
-  - 7-day cooldown for recent provider failures
-  - Immediate retry when an app upgrade changes the mapped provider symbol
-  - Coverage calculation aligned with the visible ranking thresholds
-
-Live HTTP calls are not executed as part of the offline build validation. Provider adapters remain defensive and the app now exposes provider success/error/rate-limit diagnostics directly in the data-quality tab.
+- Python syntax compilation for application, refresh engine and background agent.
+- Automated tests cover scoring, source precedence, international ticker mapping, Yahoo chart parsing, provider cooldowns, stale-price selection, Finnhub refresh windows and ranking coverage alignment.
+- One-click refresh reuses fresh caches and only schedules missing/stale data.
+- Yahoo price failures preserve previous valid price timestamps and receive a cooldown.
+- Finnhub successful rows have a success timestamp; provider failures use a separate attempt timestamp.
+- GitHub Actions agent uses the same refresh engine as the Streamlit app and persists compressed cache files under `data_cache/`.
+- Live third-party endpoints are not exercised by the offline test suite; runtime diagnostics remain visible in the app.
