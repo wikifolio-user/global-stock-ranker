@@ -1,6 +1,20 @@
-# Global Stock Ranker 3.0 – kostenlos, weltweit, ohne Terminal
+# Global Stock Ranker 3.1 – kostenlos, weltweit, ohne Terminal
 
 Diese Version ersetzt FMP vollständig. Sie kombiniert mehrere kostenlose Quellen und ist so aufgebaut, dass du die Dateien direkt auf dem iPhone in GitHub anlegen oder ersetzen kannst.
+
+
+## Neu in Version 3.1
+
+- Internationale Symbolzuordnung repariert und erweitert.
+- Fehler wie `BP..L`, `RR..L` und `BA..L` werden automatisch korrigiert.
+- Alte Universe-Caches werden beim Laden mit der neuen Mapping-Logik aktualisiert.
+- Provider-Fehler blockieren nach einem Fehlversuch nicht mehr jeden folgenden Batch.
+- Bei einer korrigierten Symbolzuordnung wird trotz altem 404-Cache sofort neu versucht.
+- Datenqualitäts-Tab zeigt nutzbare Zeilen, Fehler und Rate-Limits pro Fundamentals-Provider.
+- Ranking-Abdeckung entspricht jetzt exakt den aktiven Rankingfiltern.
+- Streamlit-Deprecation-Warnungen für `use_container_width` wurden beseitigt.
+
+Vor dem Upgrade aus 3.0 bitte im Tab **Backup** ein komplettes Daten-Backup herunterladen. Details stehen in `UPGRADE_3_1.md`.
 
 ## Datenquellen
 

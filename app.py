@@ -27,6 +27,8 @@ from pipeline import (
     import_cache_bytes,
     load_cache,
     provenance_table,
+    provider_batch_stats,
+    provider_diagnostics,
     save_cache,
     select_next_symbols,
     upsert_cache,
@@ -60,7 +62,7 @@ PATHS = {
 }
 
 st.set_page_config(
-    page_title="Global Stock Ranker 3.0",
+    page_title="Global Stock Ranker 3.1",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -181,7 +183,7 @@ def load_live_caches():
     )
 
 
-st.title("📈 Global Stock Ranker 3.0")
+st.title("📈 Global Stock Ranker 3.1")
 st.caption(
     "Kostenloses Multi-Source-Research · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo/yfinance · "
     "Qualität, Wachstum, FCF, Bilanz, Bewertung, DCF-Proxy, Trend und Veränderungshistorie."
@@ -218,14 +220,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Aktualisieren")
-    refresh_universe = st.button("1 · Weltuniversum aktualisieren", use_container_width=True)
+    refresh_universe = st.button("1 · Weltuniversum aktualisieren", width="stretch")
     price_scope = st.selectbox("Kursuniversum", ["Top 500", "Top 1000", "Global (~2.200)"])
-    refresh_prices = st.button("2 · Kurs & Trend aktualisieren", use_container_width=True)
-    refresh_sec = st.button("3 · SEC-US-Fundamentals aktualisieren", use_container_width=True)
+    refresh_prices = st.button("2 · Kurs & Trend aktualisieren", width="stretch")
+    refresh_sec = st.button("3 · SEC-US-Fundamentals aktualisieren", width="stretch")
 
     enrich_source = st.selectbox("Internationale Ergänzung", ["Finnhub (empfohlen)", "Yahoo Fallback"])
     enrich_batch = st.selectbox("Aktien pro Lauf", [50, 100, 250, 500], index=1)
-    enrich_fundamentals = st.button("4 · Fehlende Fundamentals ergänzen", use_container_width=True)
+    enrich_fundamentals = st.button("4 · Fehlende Fundamentals ergänzen", width="stretch")
 
     st.caption(
         "Der globale kostenlose Datensatz wird schrittweise aufgebaut und lokal gecacht. "
@@ -293,15 +295,25 @@ else:
                     fresh = enrich_finnhub_fundamentals(universe, symbols, finnhub_key)
                 finnhub_cache = upsert_cache(finnhub_cache, fresh)
                 save_cache(finnhub_cache, PATHS["finnhub"])
-                good = int((fresh.get("provider_error", pd.Series(index=fresh.index, dtype=object)).fillna("") == "").sum()) if not fresh.empty else 0
-                operation_messages.append(("success", f"Finnhub-Lauf abgeschlossen: {len(fresh)} Antworten, {good} ohne Provider-Fehler."))
+                stats = provider_batch_stats(fresh)
+                kind = "success" if stats["useful"] > 0 else "warning"
+                operation_messages.append((kind,
+                    f"Finnhub: {stats['responses']} Antworten · {stats['useful']} nutzbar · "
+                    f"{stats['errors']} Fehler · {stats['rate_limits']} Rate-Limit. "
+                    "Fehlversuche werden 7 Tage übersprungen, damit der nächste Lauf weiterkommt."
+                ))
             else:
                 symbols = select_next_symbols(universe, yahoo_cache, int(enrich_batch), non_us_first=True)
                 with st.spinner(f"Yahoo ergänzt bis zu {len(symbols)} Aktien …"):
                     fresh = enrich_yahoo_fundamentals(universe, symbols, deep=False)
                 yahoo_cache = upsert_cache(yahoo_cache, fresh)
                 save_cache(yahoo_cache, PATHS["yahoo"])
-                operation_messages.append(("success", f"Yahoo-Fundamentals ergänzt: {len(fresh)} Antworten."))
+                stats = provider_batch_stats(fresh)
+                kind = "success" if stats["useful"] > 0 else "warning"
+                operation_messages.append((kind,
+                    f"Yahoo Fundamentals: {stats['responses']} Antworten · {stats['useful']} nutzbar · "
+                    f"{stats['errors']} Fehler. Fehlversuche werden 7 Tage übersprungen."
+                ))
             data_updated = True
         except Exception as exc:
             operation_messages.append(("error", f"Fundamental-Ergänzung: {exc}"))
@@ -357,9 +369,14 @@ scored = scored.sort_values(["ranking_score", "score_total", "data_confidence", 
 scored["rank"] = np.arange(1, len(scored) + 1)
 top100 = scored.head(TOP_N).copy()
 
-coverage = coverage_summary(raw) if mode != "Demo" else {
-    "universe": len(raw), "eligible_60": len(raw), "coverage_pct": 100.0,
-    "non_us_coverage_pct": 100.0, "status": "Demo"
+coverage = coverage_summary(
+    scored_all,
+    min_completeness=min_completeness,
+    min_confidence=min_confidence,
+) if mode != "Demo" else {
+    "universe": len(raw), "eligible": len(raw), "coverage_pct": 100.0,
+    "non_us_coverage_pct": 100.0, "status": "Demo",
+    "min_completeness": min_completeness, "min_confidence": min_confidence,
 }
 
 # ---------------------------------------------------------------------------
@@ -367,14 +384,15 @@ coverage = coverage_summary(raw) if mode != "Demo" else {
 # ---------------------------------------------------------------------------
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Universum", f"{int(coverage.get('universe', 0)):,}".replace(",", "."))
-k2.metric("Fundamental-Abdeckung", f"{float(coverage.get('coverage_pct', 0)):.0f}%")
+k2.metric("Ranking-Abdeckung", f"{float(coverage.get('coverage_pct', 0)):.0f}%")
 k3.metric("Nicht-US-Abdeckung", f"{float(coverage.get('non_us_coverage_pct', 0)):.0f}%")
 k4.metric("Rankingstatus", str(coverage.get("status", "—")))
 
 if mode != "Demo" and str(coverage.get("status")) == "Vorläufig":
     st.warning(
-        "Die globale Abdeckung ist noch niedrig. Die aktuelle Top-100-Liste ist **vorläufig** und kann US-/bereits angereicherte Aktien bevorzugen. "
-        "Nutze SEC + mehrere Finnhub/Yahoo-Ergänzungsläufe, bis der Rankingstatus belastbarer wird."
+        "Die globale Ranking-Abdeckung ist noch niedrig. Die aktuelle Top-100-Liste ist **vorläufig** und kann US-/bereits angereicherte Aktien bevorzugen. "
+        "Nutze SEC + mehrere Finnhub/Yahoo-Ergänzungsläufe, bis der Rankingstatus belastbarer wird. "
+        f"Aktive Schwellen: Vollständigkeit ≥{min_completeness}, Confidence ≥{min_confidence}."
     )
 
 st.markdown(
@@ -443,7 +461,7 @@ with rank_tab:
             "KGV": safe_series(filtered_top, "priceToEarningsRatioTTM").map(multiple),
             "Quellen": safe_series(filtered_top, "fundamental_sources").fillna(""),
         })
-        st.dataframe(display, hide_index=True, use_container_width=True, height=680)
+        st.dataframe(display, hide_index=True, width="stretch", height=680)
     else:
         page_size = 20
         pages = max(1, int(np.ceil(len(filtered_top) / page_size)))
@@ -473,7 +491,7 @@ with rank_tab:
         data=top100.to_csv(index=False).encode("utf-8"),
         file_name=f"global_stock_top100_{datetime.now().date().isoformat()}.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
 
 # ---------------------------------------------------------------------------
@@ -574,7 +592,7 @@ with detail_tab:
         st.markdown("#### Datenherkunft")
         prov = provenance_table(row)
         prov["Wert"] = pd.to_numeric(prov["Wert"], errors="coerce")
-        st.dataframe(prov, hide_index=True, use_container_width=True)
+        st.dataframe(prov, hide_index=True, width="stretch")
 
         # Optional analyst context from Yahoo; never part of the fundamental score.
         if pd.notna(row.get("targetMeanPrice")) or pd.notna(row.get("analystCount")):
@@ -585,7 +603,7 @@ with detail_tab:
             c.metric("Recommendation Mean", f"{row.get('recommendationMean', np.nan):.2f}" if pd.notna(row.get("recommendationMean")) else "—")
 
         if mode == "Live kostenlos":
-            if st.button("Diese Aktie kostenlos vertiefen (Yahoo Statements)", use_container_width=True):
+            if st.button("Diese Aktie kostenlos vertiefen (Yahoo Statements)", width="stretch"):
                 try:
                     with st.spinner("Jahresabschlüsse werden ergänzend geladen …"):
                         fresh = enrich_yahoo_fundamentals(universe, [str(row["symbol"])], deep=True, workers=1)
@@ -603,36 +621,48 @@ with quality_tab:
     st.subheader("Abdeckung & Datenvertrauen")
     q1, q2, q3, q4 = st.columns(4)
     q1.metric("Rankingstatus", str(coverage.get("status", "—")))
-    q2.metric("≥60 Confidence", f"{int(coverage.get('eligible_60', 0)):,}".replace(",", "."))
+    q2.metric("Rankingfähig", f"{int(coverage.get('eligible', 0)):,}".replace(",", "."))
     q3.metric("Gesamt-Abdeckung", f"{float(coverage.get('coverage_pct', 0)):.1f}%")
     q4.metric("Nicht-US-Abdeckung", f"{float(coverage.get('non_us_coverage_pct', 0)):.1f}%")
 
     if mode != "Demo":
-        providers = pd.DataFrame({
-            "Quelle": ["iShares ACWI", "SEC EDGAR", "Finnhub", "Yahoo Fundamentals", "Yahoo Kurse"],
-            "Cache-Zeilen": [len(universe), len(sec_cache), len(finnhub_cache), len(yahoo_cache), len(price_cache)],
-            "Rolle": [
-                "Weltweites Aktienuniversum",
-                "Offizielle US-XBRL-Fundamentals",
-                "Globale Basic Financials / Ratios",
-                "Best-Effort Fundamentals + Analystenkontext",
-                "Kurs, 50/200T, 52W, Momentum",
-            ],
-        })
-        st.dataframe(providers, hide_index=True, use_container_width=True)
+        provider_rows = [
+            {
+                "Quelle": "iShares ACWI", "Cache-Zeilen": len(universe), "Nutzbar": len(universe),
+                "Fehler": 0, "Rate-Limit": 0, "Letzte Aktualisierung": "—",
+                "Rolle": "Weltweites Aktienuniversum",
+            },
+            {**provider_diagnostics(sec_cache, "SEC EDGAR"), "Rolle": "Offizielle US-XBRL-Fundamentals"},
+            {**provider_diagnostics(finnhub_cache, "Finnhub"), "Rolle": "Globale Basic Financials / Ratios"},
+            {**provider_diagnostics(yahoo_cache, "Yahoo Fundamentals"), "Rolle": "Best-Effort Fundamentals + Analystenkontext"},
+            {
+                "Quelle": "Yahoo Kurse", "Cache-Zeilen": len(price_cache), "Nutzbar": len(price_cache),
+                "Fehler": 0, "Rate-Limit": 0, "Letzte Aktualisierung": "—",
+                "Rolle": "Kurs, 50/200T, 52W, Momentum",
+            },
+        ]
+        providers = pd.DataFrame(provider_rows)
+        st.dataframe(providers, hide_index=True, width="stretch")
+        st.caption(
+            "Nutzbar = mindestens 5 Kern-Fundamentalkennzahlen im jeweiligen Provider-Cache. "
+            "Fehlgeschlagene Finnhub/Yahoo-Fundamentalabrufe werden 7 Tage nicht erneut ausgewählt."
+        )
 
     if not raw.empty and "country" in raw.columns:
-        tmp = raw.copy()
+        tmp = scored_all.copy()
         tmp["_confidence"] = pd.to_numeric(tmp.get("data_confidence"), errors="coerce").fillna(0)
+        tmp["_completeness"] = pd.to_numeric(tmp.get("data_completeness"), errors="coerce").fillna(0)
+        tmp["_eligible"] = (tmp["_confidence"] >= min_confidence) & (tmp["_completeness"] >= min_completeness)
         country_cov = tmp.groupby("country", dropna=False).agg(
             Aktien=("symbol", "count"),
-            Ausreichend=("_confidence", lambda s: int((s >= 60).sum())),
+            Ausreichend=("_eligible", "sum"),
             Median_Confidence=("_confidence", "median"),
         ).reset_index()
+        country_cov["Ausreichend"] = country_cov["Ausreichend"].astype(int)
         country_cov["Abdeckung %"] = (country_cov["Ausreichend"] / country_cov["Aktien"] * 100).round(1)
         country_cov = country_cov.sort_values("Aktien", ascending=False).head(30)
         st.markdown("#### Abdeckung nach Land")
-        st.dataframe(country_cov, hide_index=True, use_container_width=True)
+        st.dataframe(country_cov, hide_index=True, width="stretch")
 
     st.info(
         "Data Confidence bewertet **Vollständigkeit + Quellenqualität + Kursverfügbarkeit**. "
@@ -659,13 +689,13 @@ with history_tab:
                 st.markdown("#### Rangverlauf")
                 rank_chart = sh.set_index("snapshot_date")[["history_rank"]].apply(pd.to_numeric, errors="coerce")
                 st.line_chart(rank_chart)
-            st.dataframe(sh.tail(30), hide_index=True, use_container_width=True)
+            st.dataframe(sh.tail(30), hide_index=True, width="stretch")
         st.download_button(
             "Historie als CSV sichern",
             data=history.to_csv(index=False).encode("utf-8"),
             file_name="ranking_history.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
 # ---------------------------------------------------------------------------
@@ -703,11 +733,11 @@ with backup_tab:
         data=backup_bytes,
         file_name=f"global_stock_ranker_backup_{datetime.now().date().isoformat()}.zip",
         mime="application/zip",
-        use_container_width=True,
+        width="stretch",
     )
 
     upload = st.file_uploader("Backup-ZIP wiederherstellen", type=["zip"])
-    if upload is not None and st.button("Backup wiederherstellen", use_container_width=True):
+    if upload is not None and st.button("Backup wiederherstellen", width="stretch"):
         try:
             restored = restore_backup(upload)
             st.success("Wiederhergestellt: " + ", ".join(restored))
@@ -717,7 +747,7 @@ with backup_tab:
 
     st.markdown("#### Alternative: einzelne Historie importieren")
     history_upload = st.file_uploader("Historie CSV / CSV.GZ", type=["csv", "gz"], key="history_import")
-    if history_upload is not None and st.button("Historie zusammenführen", use_container_width=True):
+    if history_upload is not None and st.button("Historie zusammenführen", width="stretch"):
         try:
             imported = import_cache_bytes(history_upload)
             merged = merge_imported_history(load_history(PATHS["history"]), imported)

@@ -15,8 +15,9 @@ class UniverseError(RuntimeError):
     pass
 
 
-# iShares exchange labels -> Yahoo/Finnhub-style suffixes.
-# US listings intentionally have no suffix.
+# Exact iShares exchange labels -> Yahoo/Finnhub-style suffixes.
+# US listings intentionally have no suffix. The fuzzy/country fallbacks below
+# cover label variations that iShares occasionally changes in the holdings CSV.
 EXCHANGE_SUFFIXES = {
     "NASDAQ": "",
     "New York Stock Exchange Inc.": "",
@@ -51,6 +52,9 @@ EXCHANGE_SUFFIXES = {
     "Japan Exchange Group": ".T",
     "Hong Kong Exchanges And Clearing Ltd": ".HK",
     "Hong Kong Stock Exchange": ".HK",
+    "Shanghai Stock Exchange": ".SS",
+    "Shenzhen Stock Exchange": ".SZ",
+    "Beijing Stock Exchange": ".BJ",
     "Taiwan Stock Exchange": ".TW",
     "Taipei Exchange": ".TWO",
     "Korea Exchange (Stock Market)": ".KS",
@@ -71,6 +75,97 @@ EXCHANGE_SUFFIXES = {
     "Bolsa Mexicana De Valores": ".MX",
     "Santiago Stock Exchange": ".SN",
     "Borsa Istanbul": ".IS",
+    "Vienna Stock Exchange": ".VI",
+    "Irish Stock Exchange": ".IR",
+}
+
+# Fuzzy matching makes the mapper robust to iShares wording/capitalization changes.
+EXCHANGE_PATTERNS = [
+    (r"new york stock|\bnyse\b|nyse arca|nyse american", ""),
+    (r"tsx venture", ".V"),
+    (r"toronto|\btsx\b", ".TO"),
+    (r"london", ".L"),
+    (r"euronext.*amsterdam|amsterdam", ".AS"),
+    (r"euronext.*paris|paris", ".PA"),
+    (r"euronext.*bruss|brussels", ".BR"),
+    (r"euronext.*lisbon|lisbon", ".LS"),
+    (r"xetra|deutsche boerse", ".DE"),
+    (r"frankfurt", ".F"),
+    (r"six swiss|swiss exchange|zurich", ".SW"),
+    (r"borsa italiana|milan", ".MI"),
+    (r"madrid|spanish stock", ".MC"),
+    (r"stockholm|nasdaq stockholm", ".ST"),
+    (r"copenhagen|nasdaq copenhagen", ".CO"),
+    (r"helsinki|nasdaq helsinki", ".HE"),
+    (r"oslo", ".OL"),
+    (r"warsaw", ".WA"),
+    (r"vienna", ".VI"),
+    (r"irish|dublin", ".IR"),
+    (r"tokyo|japan exchange", ".T"),
+    (r"hong kong", ".HK"),
+    (r"shanghai", ".SS"),
+    (r"shenzhen", ".SZ"),
+    (r"beijing", ".BJ"),
+    (r"taipei", ".TWO"),
+    (r"taiwan", ".TW"),
+    (r"kosdaq", ".KQ"),
+    (r"korea exchange|krx", ".KS"),
+    (r"australian|\basx\b", ".AX"),
+    (r"new zealand|\bnzx\b", ".NZ"),
+    (r"singapore", ".SI"),
+    (r"national stock exchange.*india|\bnse\b", ".NS"),
+    (r"bombay|\bbse\b", ".BO"),
+    (r"indonesia", ".JK"),
+    (r"bursa malaysia|malaysia", ".KL"),
+    (r"thailand", ".BK"),
+    (r"johannesburg", ".JO"),
+    (r"tel aviv", ".TA"),
+    (r"saudi|tadawul", ".SR"),
+    (r"brazil|bovespa|balcao|\bb3\b", ".SA"),
+    (r"mexicana|mexico", ".MX"),
+    (r"santiago|chile", ".SN"),
+    (r"istanbul|turkey|türkiye", ".IS"),
+]
+
+# Conservative country fallback when the exchange label itself is unknown.
+COUNTRY_SUFFIXES = {
+    "United Kingdom": ".L",
+    "Australia": ".AX",
+    "Canada": ".TO",
+    "France": ".PA",
+    "Germany": ".DE",
+    "Switzerland": ".SW",
+    "Netherlands": ".AS",
+    "Belgium": ".BR",
+    "Portugal": ".LS",
+    "Italy": ".MI",
+    "Spain": ".MC",
+    "Sweden": ".ST",
+    "Denmark": ".CO",
+    "Finland": ".HE",
+    "Norway": ".OL",
+    "Poland": ".WA",
+    "Austria": ".VI",
+    "Ireland": ".IR",
+    "Japan": ".T",
+    "Hong Kong": ".HK",
+    "Taiwan": ".TW",
+    "Korea (South)": ".KS",
+    "South Korea": ".KS",
+    "India": ".NS",
+    "New Zealand": ".NZ",
+    "Singapore": ".SI",
+    "Indonesia": ".JK",
+    "Malaysia": ".KL",
+    "Thailand": ".BK",
+    "South Africa": ".JO",
+    "Israel": ".TA",
+    "Saudi Arabia": ".SR",
+    "Brazil": ".SA",
+    "Mexico": ".MX",
+    "Chile": ".SN",
+    "Turkey": ".IS",
+    "Türkiye": ".IS",
 }
 
 
@@ -85,35 +180,86 @@ def normalize_us_ticker(value: str) -> str:
     s = _clean_text(value).upper()
     s = re.sub(r"\s+", "-", s)
     s = s.replace(".", "-")
-    return s
+    return s.strip("-")
 
 
 def canonical_key(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", _clean_text(value).upper())
 
 
-def to_provider_symbol(ticker: str, exchange: str, location: str = "") -> str:
-    ticker = _clean_text(ticker)
+def _clean_non_us_ticker(value: str) -> str:
+    """Normalize iShares ticker notation before adding a Yahoo-style suffix.
+
+    iShares sometimes uses a trailing dot for London securities (e.g. BP., RR., BA.).
+    Appending '.L' blindly creates invalid Yahoo symbols such as BP..L. Trailing
+    punctuation is therefore removed, while internal class separators become '-'.
+    """
+    s = _clean_text(value).upper().strip()
+    s = re.sub(r"[.\s]+$", "", s)  # BP. -> BP, RR. -> RR
+    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s
+
+
+def _china_suffix(ticker: str) -> str:
+    digits = re.sub(r"\D", "", ticker)
+    if not digits:
+        return ""
+    if digits.startswith(("6", "9")):
+        return ".SS"
+    if digits.startswith(("0", "2", "3")):
+        return ".SZ"
+    if digits.startswith(("4", "8")):
+        return ".BJ"
+    return ""
+
+
+def infer_exchange_suffix(ticker: str, exchange: str, location: str = "") -> str:
     exchange = _clean_text(exchange)
     location = _clean_text(location)
-    if not ticker:
+
+    if location == "United States" or exchange in {
+        "NASDAQ", "NYSE", "New York Stock Exchange Inc.", "NYSE Arca", "NYSE American"
+    }:
+        return ""
+
+    if exchange in EXCHANGE_SUFFIXES:
+        return EXCHANGE_SUFFIXES[exchange]
+
+    ex_lower = exchange.lower()
+    for pattern, suffix in EXCHANGE_PATTERNS:
+        if re.search(pattern, ex_lower, flags=re.IGNORECASE):
+            return suffix
+
+    if location == "China":
+        return _china_suffix(ticker)
+    return COUNTRY_SUFFIXES.get(location, "")
+
+
+def to_provider_symbol(ticker: str, exchange: str, location: str = "") -> str:
+    ticker_raw = _clean_text(ticker)
+    exchange = _clean_text(exchange)
+    location = _clean_text(location)
+    if not ticker_raw:
         return ""
 
     # US share classes: BRK B -> BRK-B, BF B -> BF-B.
-    if location == "United States" or exchange in {"NASDAQ", "NYSE", "New York Stock Exchange Inc.", "NYSE Arca", "NYSE American"}:
-        return normalize_us_ticker(ticker)
+    if location == "United States" or exchange in {
+        "NASDAQ", "NYSE", "New York Stock Exchange Inc.", "NYSE Arca", "NYSE American"
+    }:
+        return normalize_us_ticker(ticker_raw)
 
-    suffix = EXCHANGE_SUFFIXES.get(exchange, "")
+    ticker_clean = _clean_non_us_ticker(ticker_raw)
+    suffix = infer_exchange_suffix(ticker_clean, exchange, location)
 
     # Hong Kong commonly needs 4 digits in Yahoo-style symbology.
-    if suffix == ".HK" and ticker.isdigit():
-        ticker = ticker.zfill(4)
+    if suffix == ".HK" and ticker_clean.isdigit():
+        ticker_clean = ticker_clean.zfill(4)
 
-    # Preserve leading zeros for Korea/Taiwan/Japan.
-    ticker = ticker.replace(" ", "-")
-    if suffix:
-        return f"{ticker}{suffix}"
-    return ticker
+    # Do not append a suffix twice if the source already supplied one.
+    if suffix and ticker_clean.upper().endswith(suffix.upper()):
+        return ticker_clean
+    return f"{ticker_clean}{suffix}" if suffix else ticker_clean
 
 
 def parse_ishares_holdings_csv(text: str) -> pd.DataFrame:
@@ -178,6 +324,10 @@ def parse_ishares_holdings_csv(text: str) -> pd.DataFrame:
         to_provider_symbol(t, e, c)
         for t, e, c in zip(df["symbol"], df["exchange"], df["country"])
     ]
+    df["provider_suffix"] = [
+        infer_exchange_suffix(t, e, c)
+        for t, e, c in zip(df["symbol"], df["exchange"], df["country"])
+    ]
     df["canonical_key"] = df["symbol"].map(canonical_key)
     df["universe_source"] = "iShares ACWI"
     df["universe_updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -190,7 +340,7 @@ def parse_ishares_holdings_csv(text: str) -> pd.DataFrame:
 
 def fetch_acwi_universe(timeout: int = 45) -> pd.DataFrame:
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; GlobalStockRanker/3.0; personal research app)",
+        "User-Agent": "Mozilla/5.0 (compatible; GlobalStockRanker/3.1; personal research app)",
         "Accept": "text/csv,text/plain,*/*",
     }
     try:
@@ -212,6 +362,18 @@ def load_universe_cache(path: str | Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_csv(path)
+        df = pd.read_csv(path)
+        # Rebuild provider symbols on every load so a mapping fix in a new app
+        # version immediately repairs an older cached universe.
+        if not df.empty and {"symbol", "exchange", "country"}.issubset(df.columns):
+            df["provider_symbol"] = [
+                to_provider_symbol(t, e, c)
+                for t, e, c in zip(df["symbol"], df["exchange"], df["country"])
+            ]
+            df["provider_suffix"] = [
+                infer_exchange_suffix(t, e, c)
+                for t, e, c in zip(df["symbol"], df["exchange"], df["country"])
+            ]
+        return df
     except Exception:
         return pd.DataFrame()

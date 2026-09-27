@@ -1,10 +1,10 @@
-"""Zentrale Konfiguration des Global Stock Ranker 3.0.
+"""Zentrale Konfiguration des Global Stock Ranker 3.1.
 
 Die Datei ist bewusst einfach gehalten. Die meisten persönlichen Anpassungen können
 hier vorgenommen werden, ohne die Daten- oder UI-Logik anzufassen.
 """
 
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 
 # -------------------------
 # Universum / Ranking
@@ -12,8 +12,8 @@ APP_VERSION = "3.0"
 TOP_N = 100
 HISTORY_TOP_N = 350
 HISTORY_KEEP_DAYS = 730
-DEFAULT_MIN_COMPLETENESS = 58
-DEFAULT_MIN_CONFIDENCE = 62
+DEFAULT_MIN_COMPLETENESS = 55
+DEFAULT_MIN_CONFIDENCE = 60
 EXCLUDE_SPECIAL_SECTORS_DEFAULT = True
 SPECIAL_SECTORS = {"Financials", "Real Estate"}
 

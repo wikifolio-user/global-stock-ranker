@@ -119,20 +119,53 @@ def select_next_symbols(
     provider_cache: pd.DataFrame,
     limit: int,
     non_us_first: bool = True,
+    retry_after_days: int = 7,
 ) -> list[str]:
-    """Select highest-weight securities that do not yet have useful provider data."""
+    """Select highest-weight securities not recently attempted by this provider.
+
+    Version 3.1 deliberately skips recent provider failures and low-coverage replies.
+    Without this cooldown, the same malformed/unsupported symbols can consume every
+    batch repeatedly and prevent the global dataset from progressing. Useful rows
+    (>=5 core metrics) remain covered indefinitely; recent attempts are retried only
+    after ``retry_after_days``.
+    """
     work = universe.copy()
     if "ishares_weight_pct" in work.columns:
         work["_weight"] = pd.to_numeric(work["ishares_weight_pct"], errors="coerce").fillna(0)
     else:
         work["_weight"] = 0.0
 
-    covered: set[str] = set()
+    skip: set[str] = set()
     if provider_cache is not None and not provider_cache.empty and "symbol" in provider_cache.columns:
         pc = provider_cache.copy()
         pc["_coverage"] = _numeric_non_null_count(pc, FUNDAMENTAL_METRICS)
-        covered = set(pc.loc[pc["_coverage"] >= 5, "symbol"].astype(str))
-    work = work[~work["symbol"].astype(str).isin(covered)].copy()
+        useful = pc["_coverage"] >= 5
+        skip.update(pc.loc[useful, "symbol"].astype(str))
+
+        # Any recent provider attempt (including 404/no-data/rate-limit responses) gets
+        # a cooldown. This prevents pathological retry loops while still allowing a
+        # future re-check if a provider adds coverage or a mapping is fixed.
+        if "fundamental_updated_at" in pc.columns and retry_after_days > 0:
+            attempted_at = pd.to_datetime(pc["fundamental_updated_at"], errors="coerce", utc=True)
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(retry_after_days))
+            recent = attempted_at >= cutoff
+
+            # A mapping change (e.g. BP..L -> BP.L) invalidates the cooldown so the
+            # corrected symbol is retried immediately after an app upgrade.
+            same_mapping = pd.Series(True, index=pc.index)
+            if "provider_symbol" in pc.columns and "provider_symbol" in universe.columns:
+                current_map = (
+                    universe[["symbol", "provider_symbol"]]
+                    .drop_duplicates("symbol", keep="last")
+                    .set_index("symbol")["provider_symbol"]
+                    .astype(str)
+                )
+                current_provider = pc["symbol"].astype(str).map(current_map).fillna("")
+                cached_provider = pc["provider_symbol"].fillna("").astype(str)
+                same_mapping = cached_provider.eq(current_provider)
+            skip.update(pc.loc[recent & same_mapping, "symbol"].astype(str))
+
+    work = work[~work["symbol"].astype(str).isin(skip)].copy()
 
     if non_us_first and "country" in work.columns:
         work["_region_priority"] = np.where(work["country"].astype(str).eq("United States"), 1, 0)
@@ -265,18 +298,39 @@ def assemble_snapshot(
     return out.reset_index()
 
 
-def coverage_summary(snapshot: pd.DataFrame) -> dict[str, float | int | str]:
+def coverage_summary(
+    snapshot: pd.DataFrame,
+    min_completeness: float = 58,
+    min_confidence: float = 62,
+) -> dict[str, float | int | str]:
+    """Coverage using the same eligibility rule as the visible ranking.
+
+    Older versions used confidence alone for the KPI while the Top-100 also required
+    completeness. That made the headline coverage disagree with what users could
+    actually see. Version 3.1 aligns both definitions.
+    """
     if snapshot is None or snapshot.empty:
-        return {"universe": 0, "eligible_60": 0, "eligible_70": 0, "non_us_eligible_60": 0, "status": "Keine Daten"}
-    conf = pd.to_numeric(snapshot.get("data_confidence"), errors="coerce").fillna(0)
+        return {
+            "universe": 0, "eligible": 0, "non_us_eligible": 0,
+            "coverage_pct": 0.0, "non_us_coverage_pct": 0.0,
+            "status": "Keine Daten",
+        }
+    conf = pd.to_numeric(
+        snapshot.get("data_confidence", pd.Series(0, index=snapshot.index)), errors="coerce"
+    ).fillna(0)
+    completeness_col = "data_completeness" if "data_completeness" in snapshot.columns else "raw_data_completeness"
+    completeness = pd.to_numeric(
+        snapshot.get(completeness_col, pd.Series(0, index=snapshot.index)), errors="coerce"
+    ).fillna(0)
+    eligible_mask = (conf >= float(min_confidence)) & (completeness >= float(min_completeness))
+
     country = snapshot.get("country", pd.Series("", index=snapshot.index)).astype(str)
     n = len(snapshot)
-    eligible60 = int((conf >= 60).sum())
-    eligible70 = int((conf >= 70).sum())
+    eligible = int(eligible_mask.sum())
     non_us = ~country.eq("United States")
     non_us_total = int(non_us.sum())
-    non_us_eligible = int(((conf >= 60) & non_us).sum())
-    ratio = eligible60 / n if n else 0
+    non_us_eligible = int((eligible_mask & non_us).sum())
+    ratio = eligible / n if n else 0
     non_us_ratio = non_us_eligible / non_us_total if non_us_total else 0
     if ratio >= 0.85 and non_us_ratio >= 0.75:
         status = "Global belastbar"
@@ -286,14 +340,51 @@ def coverage_summary(snapshot: pd.DataFrame) -> dict[str, float | int | str]:
         status = "Vorläufig"
     return {
         "universe": n,
-        "eligible_60": eligible60,
-        "eligible_70": eligible70,
-        "non_us_eligible_60": non_us_eligible,
+        "eligible": eligible,
+        "non_us_eligible": non_us_eligible,
         "coverage_pct": round(ratio * 100, 1),
         "non_us_coverage_pct": round(non_us_ratio * 100, 1),
         "status": status,
+        "min_completeness": float(min_completeness),
+        "min_confidence": float(min_confidence),
     }
 
+
+def provider_diagnostics(frame: pd.DataFrame, provider: str) -> dict[str, object]:
+    """Summarize provider cache quality for the diagnostics tab."""
+    if frame is None or frame.empty:
+        return {
+            "Quelle": provider, "Cache-Zeilen": 0, "Nutzbar": 0,
+            "Fehler": 0, "Rate-Limit": 0, "Letzte Aktualisierung": "—",
+        }
+    f = frame.copy()
+    coverage = _numeric_non_null_count(f, FUNDAMENTAL_METRICS)
+    errors = f.get("provider_error", pd.Series("", index=f.index)).fillna("").astype(str)
+    updated = pd.to_datetime(f.get("fundamental_updated_at", pd.Series(index=f.index, dtype=object)), errors="coerce", utc=True)
+    latest = updated.max()
+    latest_text = latest.strftime("%Y-%m-%d %H:%M UTC") if pd.notna(latest) else "—"
+    return {
+        "Quelle": provider,
+        "Cache-Zeilen": int(len(f)),
+        "Nutzbar": int((coverage >= 5).sum()),
+        "Fehler": int(errors.ne("").sum()),
+        "Rate-Limit": int(errors.str.contains("RATE_LIMIT", case=False, regex=False).sum()),
+        "Letzte Aktualisierung": latest_text,
+    }
+
+
+def provider_batch_stats(frame: pd.DataFrame) -> dict[str, int]:
+    """Return compact counters for a freshly fetched provider batch."""
+    if frame is None or frame.empty:
+        return {"responses": 0, "useful": 0, "errors": 0, "rate_limits": 0}
+    coverage = _numeric_non_null_count(frame, FUNDAMENTAL_METRICS)
+    errors = frame.get("provider_error", pd.Series("", index=frame.index)).fillna("").astype(str)
+    return {
+        "responses": int(len(frame)),
+        "useful": int((coverage >= 5).sum()),
+        "errors": int(errors.ne("").sum()),
+        "rate_limits": int(errors.str.contains("RATE_LIMIT", case=False, regex=False).sum()),
+    }
 
 def provenance_table(row: pd.Series) -> pd.DataFrame:
     labels = {
