@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from data_sources import (
     DataSourceError,
     enrich_finnhub_fundamentals,
-    enrich_yahoo_fundamentals,
     fetch_sec_bulk_snapshot,
     fetch_yahoo_price_snapshot,
 )
@@ -62,7 +61,7 @@ PATHS = {
 }
 
 st.set_page_config(
-    page_title="Global Stock Ranker 3.1",
+    page_title="Global Stock Ranker 3.2",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -137,6 +136,8 @@ def weighted_universe_slice(universe: pd.DataFrame, scope: str) -> pd.DataFrame:
     work = universe.copy()
     work["_weight"] = pd.to_numeric(work.get("ishares_weight_pct"), errors="coerce").fillna(0)
     work = work.sort_values("_weight", ascending=False)
+    if scope.startswith("Top 250"):
+        return work.head(250).drop(columns="_weight")
     if scope.startswith("Top 500"):
         return work.head(500).drop(columns="_weight")
     if scope.startswith("Top 1000"):
@@ -183,9 +184,9 @@ def load_live_caches():
     )
 
 
-st.title("📈 Global Stock Ranker 3.1")
+st.title("📈 Global Stock Ranker 3.2")
 st.caption(
-    "Kostenloses Multi-Source-Research · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo/yfinance · "
+    "Kostenloses Multi-Source-Research · iShares ACWI + SEC EDGAR + Finnhub Free + Yahoo Chart · "
     "Qualität, Wachstum, FCF, Bilanz, Bewertung, DCF-Proxy, Trend und Veränderungshistorie."
 )
 
@@ -221,11 +222,12 @@ with st.sidebar:
     st.divider()
     st.subheader("Aktualisieren")
     refresh_universe = st.button("1 · Weltuniversum aktualisieren", width="stretch")
-    price_scope = st.selectbox("Kursuniversum", ["Top 500", "Top 1000", "Global (~2.200)"])
+    price_scope = st.selectbox("Kursuniversum", ["Top 250", "Top 500", "Top 1000", "Global (~2.200)"], index=1)
     refresh_prices = st.button("2 · Kurs & Trend aktualisieren", width="stretch")
     refresh_sec = st.button("3 · SEC-US-Fundamentals aktualisieren", width="stretch")
 
-    enrich_source = st.selectbox("Internationale Ergänzung", ["Finnhub (empfohlen)", "Yahoo Fallback"])
+    st.caption("Internationale Fundamentals: **Finnhub**. Yahoo-Fundamentals sind in 3.2 wegen Cloud-401/Crumb-Fehlern deaktiviert.")
+    enrich_source = "Finnhub (empfohlen)"
     enrich_batch = st.selectbox("Aktien pro Lauf", [50, 100, 250, 500], index=1)
     enrich_fundamentals = st.button("4 · Fehlende Fundamentals ergänzen", width="stretch")
 
@@ -272,7 +274,7 @@ else:
             operation_messages.append(("success", f"Kursdaten aktualisiert: {len(fresh_prices):,} Aktien.".replace(",", ".")))
             data_updated = True
         except Exception as exc:
-            operation_messages.append(("error", f"Yahoo-Kursabruf: {exc}"))
+            operation_messages.append(("error", f"Yahoo-Chart-Kursabruf: {exc}"))
 
     if refresh_sec and not universe.empty:
         try:
@@ -287,33 +289,20 @@ else:
 
     if enrich_fundamentals and not universe.empty:
         try:
-            if enrich_source.startswith("Finnhub"):
-                if not finnhub_key:
-                    raise DataSourceError("Für Finnhub bitte den kostenlosen FINNHUB_API_KEY eintragen.")
-                symbols = select_next_symbols(universe, finnhub_cache, int(enrich_batch), non_us_first=True)
-                with st.spinner(f"Finnhub ergänzt bis zu {len(symbols)} Aktien …"):
-                    fresh = enrich_finnhub_fundamentals(universe, symbols, finnhub_key)
-                finnhub_cache = upsert_cache(finnhub_cache, fresh)
-                save_cache(finnhub_cache, PATHS["finnhub"])
-                stats = provider_batch_stats(fresh)
-                kind = "success" if stats["useful"] > 0 else "warning"
-                operation_messages.append((kind,
-                    f"Finnhub: {stats['responses']} Antworten · {stats['useful']} nutzbar · "
-                    f"{stats['errors']} Fehler · {stats['rate_limits']} Rate-Limit. "
-                    "Fehlversuche werden 7 Tage übersprungen, damit der nächste Lauf weiterkommt."
-                ))
-            else:
-                symbols = select_next_symbols(universe, yahoo_cache, int(enrich_batch), non_us_first=True)
-                with st.spinner(f"Yahoo ergänzt bis zu {len(symbols)} Aktien …"):
-                    fresh = enrich_yahoo_fundamentals(universe, symbols, deep=False)
-                yahoo_cache = upsert_cache(yahoo_cache, fresh)
-                save_cache(yahoo_cache, PATHS["yahoo"])
-                stats = provider_batch_stats(fresh)
-                kind = "success" if stats["useful"] > 0 else "warning"
-                operation_messages.append((kind,
-                    f"Yahoo Fundamentals: {stats['responses']} Antworten · {stats['useful']} nutzbar · "
-                    f"{stats['errors']} Fehler. Fehlversuche werden 7 Tage übersprungen."
-                ))
+            if not finnhub_key:
+                raise DataSourceError("Für Finnhub bitte den kostenlosen FINNHUB_API_KEY eintragen.")
+            symbols = select_next_symbols(universe, finnhub_cache, int(enrich_batch), non_us_first=True)
+            with st.spinner(f"Finnhub ergänzt bis zu {len(symbols)} Aktien …"):
+                fresh = enrich_finnhub_fundamentals(universe, symbols, finnhub_key)
+            finnhub_cache = upsert_cache(finnhub_cache, fresh)
+            save_cache(finnhub_cache, PATHS["finnhub"])
+            stats = provider_batch_stats(fresh)
+            kind = "success" if stats["useful"] > 0 else "warning"
+            operation_messages.append((kind,
+                f"Finnhub: {stats['responses']} Antworten · {stats['useful']} nutzbar · "
+                f"{stats['errors']} Fehler · {stats['rate_limits']} Rate-Limit. "
+                "Fehlversuche werden 7 Tage übersprungen, damit der nächste Lauf weiterkommt."
+            ))
             data_updated = True
         except Exception as exc:
             operation_messages.append(("error", f"Fundamental-Ergänzung: {exc}"))
@@ -391,7 +380,7 @@ k4.metric("Rankingstatus", str(coverage.get("status", "—")))
 if mode != "Demo" and str(coverage.get("status")) == "Vorläufig":
     st.warning(
         "Die globale Ranking-Abdeckung ist noch niedrig. Die aktuelle Top-100-Liste ist **vorläufig** und kann US-/bereits angereicherte Aktien bevorzugen. "
-        "Nutze SEC + mehrere Finnhub/Yahoo-Ergänzungsläufe, bis der Rankingstatus belastbarer wird. "
+        "Nutze SEC + mehrere Finnhub-Ergänzungsläufe, bis der Rankingstatus belastbarer wird. "
         f"Aktive Schwellen: Vollständigkeit ≥{min_completeness}, Confidence ≥{min_confidence}."
     )
 
@@ -603,16 +592,11 @@ with detail_tab:
             c.metric("Recommendation Mean", f"{row.get('recommendationMean', np.nan):.2f}" if pd.notna(row.get("recommendationMean")) else "—")
 
         if mode == "Live kostenlos":
-            if st.button("Diese Aktie kostenlos vertiefen (Yahoo Statements)", width="stretch"):
-                try:
-                    with st.spinner("Jahresabschlüsse werden ergänzend geladen …"):
-                        fresh = enrich_yahoo_fundamentals(universe, [str(row["symbol"])], deep=True, workers=1)
-                        yahoo_cache = upsert_cache(yahoo_cache, fresh)
-                        save_cache(yahoo_cache, PATHS["yahoo"])
-                    st.success("Deep-Dive-Daten gespeichert. App wird neu geladen.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Deep-Dive fehlgeschlagen: {exc}")
+            st.caption(
+                "Yahoo-QuoteSummary/Statements werden in Version 3.2 nicht live abgerufen, "
+                "weil Streamlit-Cloud-IP-Adressen häufig 401/Invalid-Crumb erhalten. "
+                "Bereits gecachte Yahoo-Werte bleiben sichtbar, fließen aber nur als Fallback ein."
+            )
 
 # ---------------------------------------------------------------------------
 # Data quality / diagnostics
@@ -634,18 +618,22 @@ with quality_tab:
             },
             {**provider_diagnostics(sec_cache, "SEC EDGAR"), "Rolle": "Offizielle US-XBRL-Fundamentals"},
             {**provider_diagnostics(finnhub_cache, "Finnhub"), "Rolle": "Globale Basic Financials / Ratios"},
-            {**provider_diagnostics(yahoo_cache, "Yahoo Fundamentals"), "Rolle": "Best-Effort Fundamentals + Analystenkontext"},
+            {**provider_diagnostics(yahoo_cache, "Yahoo Fundamentals (Alt-Cache)"), "Rolle": "Nur vorhandener Cache; neue Live-Abrufe in 3.2 deaktiviert"},
             {
-                "Quelle": "Yahoo Kurse", "Cache-Zeilen": len(price_cache), "Nutzbar": len(price_cache),
-                "Fehler": 0, "Rate-Limit": 0, "Letzte Aktualisierung": "—",
-                "Rolle": "Kurs, 50/200T, 52W, Momentum",
+                "Quelle": "Yahoo Chart Kurse",
+                "Cache-Zeilen": len(price_cache),
+                "Nutzbar": int(pd.to_numeric(price_cache.get("price", pd.Series(index=price_cache.index, dtype=float)), errors="coerce").notna().sum()) if not price_cache.empty else 0,
+                "Fehler": int(price_cache.get("provider_error", pd.Series(index=price_cache.index, dtype=object)).fillna("").astype(str).ne("").sum()) if not price_cache.empty else 0,
+                "Rate-Limit": int(price_cache.get("provider_error", pd.Series(index=price_cache.index, dtype=object)).fillna("").astype(str).eq("RATE_LIMIT").sum()) if not price_cache.empty else 0,
+                "Letzte Aktualisierung": "—",
+                "Rolle": "Crumb-freier v8-Chart: Kurs, 50/200T, 52W, Momentum",
             },
         ]
         providers = pd.DataFrame(provider_rows)
         st.dataframe(providers, hide_index=True, width="stretch")
         st.caption(
             "Nutzbar = mindestens 5 Kern-Fundamentalkennzahlen im jeweiligen Provider-Cache. "
-            "Fehlgeschlagene Finnhub/Yahoo-Fundamentalabrufe werden 7 Tage nicht erneut ausgewählt."
+            "Fehlgeschlagene Finnhub-Fundamentalabrufe werden 7 Tage nicht erneut ausgewählt. Yahoo-Fundamentals sind live deaktiviert."
         )
 
     if not raw.empty and "country" in raw.columns:
@@ -705,7 +693,7 @@ with method_tab:
     st.subheader("Methodik")
     st.markdown(
         """
-**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt; Yahoo/yfinance dient als kostenlose Fallback-Quelle sowie für Kurs- und Trenddaten.
+**Datenarchitektur.** Das Universum stammt aus den offiziellen Positionen des iShares MSCI ACWI ETF. Für US-Unternehmen nutzt die App kostenlose SEC-EDGAR-XBRL-Daten. Internationale Kennzahlen werden schrittweise über Finnhub Basic Financials ergänzt. Yahoo dient in 3.2 nur noch über den crumb-freien v8-Chart-Endpunkt für Kurs- und Trenddaten; QuoteSummary-Fundamentals sind live deaktiviert.
 
 **100-Punkte-Modell.** Unternehmensqualität 20, Wachstum 15, Free Cashflow 15, Bilanz 10, Kapitalallokation 10, Moat-Proxy 10, Bewertung 15 und Risiko 5 Punkte. Harte Red Flags ziehen Punkte ab. Moat und Management werden ausdrücklich nur über quantitative Proxies angenähert.
 

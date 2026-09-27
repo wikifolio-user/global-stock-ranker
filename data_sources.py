@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Iterable
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,8 @@ from settings import (
     SEC_WWW_BASE_URL,
     YAHOO_PRICE_BATCH,
     YAHOO_PRICE_PERIOD,
+    YAHOO_PRICE_PAUSE_SECONDS,
+    YAHOO_PRICE_WORKERS,
     YAHOO_WORKERS,
 )
 from universe import canonical_key
@@ -126,14 +129,107 @@ def _history_snapshot(sub: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _yahoo_chart_row(symbol: str, provider_symbol: str, period: str = YAHOO_PRICE_PERIOD, timeout: int = 20) -> dict[str, Any]:
+    """Fetch OHLCV from Yahoo's chart endpoint without quoteSummary/crumb auth.
+
+    The v8 chart endpoint does not require the crumb handshake used by Yahoo's
+    quoteSummary endpoints. This keeps price/trend refreshes independent from the
+    frequent 401 ``Invalid Crumb`` failures seen on Streamlit Cloud.
+    """
+    out: dict[str, Any] = {
+        "symbol": symbol,
+        "provider_symbol": provider_symbol,
+        "price_source": "YAHOO_CHART",
+        "price_updated_at": _now_iso(),
+    }
+    if not provider_symbol:
+        out["provider_error"] = "EMPTY_SYMBOL"
+        return out
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(str(provider_symbol), safe='')}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; GlobalStockRanker/3.2; personal research app)",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    params = {
+        "range": period,
+        "interval": "1d",
+        "events": "div,splits",
+        "includeAdjustedClose": "true",
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+    except Exception as exc:
+        out["provider_error"] = f"NETWORK: {str(exc)[:160]}"
+        return out
+
+    if r.status_code == 429:
+        out["provider_error"] = "RATE_LIMIT"
+        return out
+    if r.status_code == 401:
+        out["provider_error"] = "AUTH_401"
+        return out
+    if r.status_code == 404:
+        out["provider_error"] = "NOT_FOUND"
+        return out
+    if not r.ok:
+        out["provider_error"] = f"HTTP_{r.status_code}"
+        return out
+
+    try:
+        payload = r.json()
+        chart = payload.get("chart") or {}
+        if chart.get("error"):
+            err = chart.get("error") or {}
+            out["provider_error"] = str(err.get("code") or err.get("description") or "CHART_ERROR")[:180]
+            return out
+        result = (chart.get("result") or [None])[0]
+        if not isinstance(result, dict):
+            out["provider_error"] = "NO_CHART_RESULT"
+            return out
+        timestamps = result.get("timestamp") or []
+        indicators = result.get("indicators") or {}
+        quote_block = (indicators.get("quote") or [{}])[0] or {}
+        if not timestamps or not quote_block:
+            out["provider_error"] = "NO_PRICE_DATA"
+            return out
+
+        frame = pd.DataFrame({
+            "Close": quote_block.get("close", []),
+            "High": quote_block.get("high", []),
+            "Low": quote_block.get("low", []),
+            "Volume": quote_block.get("volume", []),
+        })
+        adj_blocks = indicators.get("adjclose") or []
+        if adj_blocks and isinstance(adj_blocks[0], dict):
+            adj = adj_blocks[0].get("adjclose") or []
+            if len(adj) == len(frame):
+                frame["Close"] = pd.Series(adj).combine_first(frame["Close"])
+        values = _history_snapshot(frame)
+        if not values:
+            out["provider_error"] = "NO_USABLE_PRICE_DATA"
+            return out
+        out.update(values)
+        out["provider_error"] = ""
+        return out
+    except Exception as exc:
+        out["provider_error"] = f"PARSE: {str(exc)[:160]}"
+        return out
+
+
 def fetch_yahoo_price_snapshot(
     universe: pd.DataFrame,
     symbols: Iterable[str] | None = None,
     period: str = YAHOO_PRICE_PERIOD,
     batch_size: int = YAHOO_PRICE_BATCH,
 ) -> pd.DataFrame:
-    """Download global price history in batches and derive trend metrics."""
-    yf = _import_yfinance()
+    """Fetch global price history via Yahoo chart API with conservative throttling.
+
+    Version 3.2 avoids ``yf.download`` for core price refreshes because cloud IPs can
+    be throttled after quoteSummary/crumb failures. Requests are made in small
+    batches, old cache rows remain intact on failures, and a rate limit stops the run
+    instead of hammering Yahoo.
+    """
     work = universe[["symbol", "provider_symbol"]].dropna().drop_duplicates("symbol").copy()
     if symbols is not None:
         wanted = {str(s) for s in symbols}
@@ -142,49 +238,39 @@ def fetch_yahoo_price_snapshot(
     if work.empty:
         return pd.DataFrame()
 
-    rows: list[dict[str, Any]] = []
     records = work.to_dict("records")
+    rows: list[dict[str, Any]] = []
+    batch_size = max(1, int(batch_size))
+    workers = max(1, int(YAHOO_PRICE_WORKERS))
+
     for start in range(0, len(records), batch_size):
         batch = records[start:start + batch_size]
-        provider_symbols = [r["provider_symbol"] for r in batch]
-        try:
-            hist = yf.download(
-                tickers=provider_symbols,
-                period=period,
-                interval="1d",
-                group_by="ticker",
-                auto_adjust=True,
-                threads=True,
-                progress=False,
-                timeout=25,
-            )
-        except Exception:
-            hist = pd.DataFrame()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_yahoo_chart_row, str(r["symbol"]), str(r["provider_symbol"]), period): r
+                for r in batch
+            }
+            batch_rows = []
+            for future in as_completed(futures):
+                rec = futures[future]
+                try:
+                    batch_rows.append(future.result())
+                except Exception as exc:
+                    batch_rows.append({
+                        "symbol": rec["symbol"],
+                        "provider_symbol": rec["provider_symbol"],
+                        "price_source": "YAHOO_CHART",
+                        "price_updated_at": _now_iso(),
+                        "provider_error": f"WORKER: {str(exc)[:160]}",
+                    })
+        rows.extend(batch_rows)
+        # A single 429 is enough to stop. Keep previous cached prices rather than
+        # producing hundreds of noisy failures from the same cloud IP.
+        if any(str(r.get("provider_error", "")) == "RATE_LIMIT" for r in batch_rows):
+            break
+        if start + batch_size < len(records):
+            time.sleep(max(0.0, float(YAHOO_PRICE_PAUSE_SECONDS)))
 
-        for rec in batch:
-            psym = rec["provider_symbol"]
-            sub = pd.DataFrame()
-            try:
-                if len(provider_symbols) == 1 and not isinstance(hist.columns, pd.MultiIndex):
-                    sub = hist.copy()
-                elif isinstance(hist.columns, pd.MultiIndex):
-                    level0 = hist.columns.get_level_values(0)
-                    level1 = hist.columns.get_level_values(1)
-                    if psym in level0:
-                        sub = hist[psym].copy()
-                    elif psym in level1:
-                        sub = hist.xs(psym, axis=1, level=1).copy()
-            except Exception:
-                sub = pd.DataFrame()
-            values = _history_snapshot(sub)
-            if values:
-                values.update({
-                    "symbol": rec["symbol"],
-                    "provider_symbol": psym,
-                    "price_source": "YAHOO",
-                    "price_updated_at": _now_iso(),
-                })
-                rows.append(values)
     return pd.DataFrame(rows)
 
 

@@ -4,7 +4,7 @@ Die Datei ist bewusst einfach gehalten. Die meisten persönlichen Anpassungen k�
 hier vorgenommen werden, ohne die Daten- oder UI-Logik anzufassen.
 """
 
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 
 # -------------------------
 # Universum / Ranking
@@ -34,11 +34,15 @@ FINNHUB_MAX_BATCH_UI = 500
 FINNHUB_DELAY_SECONDS = 1.05
 FINNHUB_RETRY_AFTER_SECONDS = 61
 
-# Yahoo/yfinance ist ein kostenloser Best-Effort-Fallback und keine offizielle Yahoo-API.
+# Yahoo Fundamentals sind in 3.2 im UI deaktiviert: quoteSummary ist auf Cloud-IP-Adressen
+# häufig crumb-/auth-gesperrt. Yahoo wird im Kern nur noch über den crumb-freien v8-Chart-
+# Endpunkt für Kurs-/Trenddaten verwendet. yfinance bleibt optional für Alt-/Detailcode.
 YAHOO_DEFAULT_BATCH = 80
 YAHOO_MAX_BATCH_UI = 300
-YAHOO_WORKERS = 4
-YAHOO_PRICE_BATCH = 80
+YAHOO_WORKERS = 1
+YAHOO_PRICE_BATCH = 25
+YAHOO_PRICE_WORKERS = 3
+YAHOO_PRICE_PAUSE_SECONDS = 1.25
 YAHOO_PRICE_PERIOD = "1y"
 
 # SEC EDGAR: offizielle, kostenlose US-XBRL-Daten. SEC_USER_AGENT mit Kontakt setzen.
