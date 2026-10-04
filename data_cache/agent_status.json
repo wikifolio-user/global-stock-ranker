@@ -1,27 +1,27 @@
 {
-  "started_at": "2026-10-04T19:42:17.991979+00:00",
+  "started_at": "2026-10-04T23:17:38.181373+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2195,
-    "universe_due": false,
-    "prices_due": 0,
-    "sec_due": false,
-    "finnhub_due": 1611,
+    "universe_due": true,
+    "prices_due": 176,
+    "sec_due": true,
+    "finnhub_due": 1959,
     "finnhub_cached": 610,
     "price_cached": 2145
   },
-  "finished_at": "2026-10-04T20:23:33.088865+00:00",
-  "elapsed_seconds": 2474.3,
+  "finished_at": "2026-10-04T23:57:26.447031+00:00",
+  "elapsed_seconds": 2387.9,
   "counters": {
-    "universe_updated": 0,
-    "prices_requested": 0,
-    "prices_responses": 0,
-    "prices_useful": 0,
-    "sec_rows": 0,
-    "finnhub_requested": 1599,
+    "universe_updated": 2195,
+    "prices_requested": 178,
+    "prices_responses": 177,
+    "prices_useful": 1,
+    "sec_rows": 510,
+    "finnhub_requested": 1550,
     "finnhub_responses": 1400,
     "finnhub_useful": 0,
-    "finnhub_errors": 1320,
+    "finnhub_errors": 1336,
     "rate_limited": 0
   },
   "coverage": {
@@ -39,11 +39,11 @@
   "plan_after": {
     "universe_rows": 2195,
     "universe_due": false,
-    "prices_due": 176,
+    "prices_due": 0,
     "sec_due": false,
-    "finnhub_due": 1611,
-    "finnhub_cached": 610,
-    "price_cached": 2145
+    "finnhub_due": 1610,
+    "finnhub_cached": 612,
+    "price_cached": 2147
   },
   "tier_counts": {
     "full": 335,
@@ -51,16 +51,16 @@
     "eligible": 356
   },
   "messages": [
-    "Universum ist frisch – übersprungen.",
-    "Kurse & Trend sind bereits aktuell – 0 Downloads.",
-    "SEC-Fundamentals sind frisch – übersprungen.",
-    "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1320 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
+    "Universum aktualisiert: 2.195 Aktien.",
+    "Kurse: 178 fällig · 1 erfolgreich. Frische Kurse blieben im Cache.",
+    "SEC: 510 US-Aktien aktualisiert.",
+    "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1336 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
   ],
   "cache_rows": {
     "universe": 2195,
     "sec": 510,
-    "finnhub": 610,
-    "prices": 2145,
+    "finnhub": 612,
+    "prices": 2147,
     "history": 2800
   }
 }
