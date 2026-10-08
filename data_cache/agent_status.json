@@ -1,27 +1,27 @@
 {
-  "started_at": "2026-10-08T06:17:38.267564+00:00",
+  "started_at": "2026-10-08T15:42:39.470301+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2195,
     "universe_due": false,
-    "prices_due": 184,
+    "prices_due": 2188,
     "sec_due": false,
-    "finnhub_due": 1632,
+    "finnhub_due": 1656,
     "finnhub_cached": 612,
     "price_cached": 2147
   },
-  "finished_at": "2026-10-08T07:08:30.103479+00:00",
-  "elapsed_seconds": 3050.9,
+  "finished_at": "2026-10-08T16:33:26.945155+00:00",
+  "elapsed_seconds": 3046.6,
   "counters": {
     "universe_updated": 0,
-    "prices_requested": 184,
-    "prices_responses": 183,
-    "prices_useful": 7,
+    "prices_requested": 2188,
+    "prices_responses": 2138,
+    "prices_useful": 1962,
     "sec_rows": 0,
-    "finnhub_requested": 1520,
-    "finnhub_responses": 1368,
+    "finnhub_requested": 1040,
+    "finnhub_responses": 936,
     "finnhub_useful": 0,
-    "finnhub_errors": 1292,
+    "finnhub_errors": 884,
     "rate_limited": 0
   },
   "coverage": {
@@ -41,7 +41,7 @@
     "universe_due": false,
     "prices_due": 0,
     "sec_due": false,
-    "finnhub_due": 1656,
+    "finnhub_due": 1655,
     "finnhub_cached": 612,
     "price_cached": 2147
   },
@@ -52,9 +52,9 @@
   },
   "messages": [
     "Universum ist frisch – übersprungen.",
-    "Kurse: 184 fällig · 7 erfolgreich. Frische Kurse blieben im Cache.",
+    "Kurse: 2188 fällig · 1962 erfolgreich. Frische Kurse blieben im Cache.",
     "SEC-Fundamentals sind frisch – übersprungen.",
-    "Finnhub: 1368 Antworten · 0 mit breiter Kennzahlenabdeckung · 1292 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
+    "Finnhub: 936 Antworten · 0 mit breiter Kennzahlenabdeckung · 884 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
   ],
   "cache_rows": {
     "universe": 2195,
