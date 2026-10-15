@@ -1,27 +1,27 @@
 {
-  "started_at": "2026-10-14T23:18:12.120554+00:00",
+  "started_at": "2026-10-15T04:51:43.552847+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2196,
     "universe_due": false,
-    "prices_due": 0,
+    "prices_due": 180,
     "sec_due": false,
-    "finnhub_due": 1660,
+    "finnhub_due": 1622,
     "finnhub_cached": 619,
     "price_cached": 2152
   },
-  "finished_at": "2026-10-15T00:03:02.165796+00:00",
-  "elapsed_seconds": 2689.0,
+  "finished_at": "2026-10-15T05:36:58.075979+00:00",
+  "elapsed_seconds": 2713.5,
   "counters": {
     "universe_updated": 0,
-    "prices_requested": 0,
-    "prices_responses": 0,
-    "prices_useful": 0,
+    "prices_requested": 180,
+    "prices_responses": 179,
+    "prices_useful": 2,
     "sec_rows": 0,
-    "finnhub_requested": 1582,
+    "finnhub_requested": 1599,
     "finnhub_responses": 1400,
     "finnhub_useful": 0,
-    "finnhub_errors": 1321,
+    "finnhub_errors": 1320,
     "rate_limited": 0
   },
   "coverage": {
@@ -52,9 +52,9 @@
   },
   "messages": [
     "Universum ist frisch – übersprungen.",
-    "Kurse & Trend sind bereits aktuell – 0 Downloads.",
+    "Kurse: 180 fällig · 2 erfolgreich. Frische Kurse blieben im Cache.",
     "SEC-Fundamentals sind frisch – übersprungen.",
-    "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1321 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
+    "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1320 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
   ],
   "cache_rows": {
     "universe": 2196,
