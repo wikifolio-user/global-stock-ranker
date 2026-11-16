@@ -1,27 +1,27 @@
 {
-  "started_at": "2026-11-16T06:46:40.603804+00:00",
+  "started_at": "2026-11-16T18:40:11.850793+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2191,
-    "universe_due": false,
-    "prices_due": 182,
-    "sec_due": false,
-    "finnhub_due": 1586,
+    "universe_due": true,
+    "prices_due": 177,
+    "sec_due": true,
+    "finnhub_due": 1592,
     "finnhub_cached": 809,
     "price_cached": 2160
   },
-  "finished_at": "2026-11-16T07:21:27.814894+00:00",
-  "elapsed_seconds": 2086.3,
+  "finished_at": "2026-11-16T19:23:09.260576+00:00",
+  "elapsed_seconds": 2576.5,
   "counters": {
-    "universe_updated": 0,
-    "prices_requested": 182,
-    "prices_responses": 181,
-    "prices_useful": 5,
-    "sec_rows": 0,
-    "finnhub_requested": 1550,
+    "universe_updated": 2191,
+    "prices_requested": 177,
+    "prices_responses": 176,
+    "prices_useful": 2,
+    "sec_rows": 510,
+    "finnhub_requested": 1597,
     "finnhub_responses": 1400,
     "finnhub_useful": 0,
-    "finnhub_errors": 1332,
+    "finnhub_errors": 1320,
     "rate_limited": 0
   },
   "coverage": {
@@ -38,12 +38,12 @@
   },
   "plan_after": {
     "universe_rows": 2191,
-    "universe_due": true,
-    "prices_due": 0,
-    "sec_due": true,
-    "finnhub_due": 1589,
-    "finnhub_cached": 809,
-    "price_cached": 2160
+    "universe_due": false,
+    "prices_due": 2009,
+    "sec_due": false,
+    "finnhub_due": 1576,
+    "finnhub_cached": 810,
+    "price_cached": 2162
   },
   "tier_counts": {
     "full": 336,
@@ -51,16 +51,16 @@
     "eligible": 362
   },
   "messages": [
-    "Universum ist frisch – übersprungen.",
-    "Kurse: 182 fällig · 5 erfolgreich. Frische Kurse blieben im Cache.",
-    "SEC-Fundamentals sind frisch – übersprungen.",
-    "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1332 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
+    "Universum aktualisiert: 2.191 Aktien.",
+    "Kurse: 177 fällig · 2 erfolgreich. Frische Kurse blieben im Cache.",
+    "SEC: 510 US-Aktien aktualisiert.",
+    "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1320 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
   ],
   "cache_rows": {
     "universe": 2191,
     "sec": 512,
-    "finnhub": 809,
-    "prices": 2160,
+    "finnhub": 810,
+    "prices": 2162,
     "history": 17850
   }
 }
