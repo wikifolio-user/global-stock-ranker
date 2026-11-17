@@ -1,24 +1,24 @@
 {
-  "started_at": "2026-11-16T18:40:11.850793+00:00",
+  "started_at": "2026-11-17T02:58:55.960715+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2191,
-    "universe_due": true,
-    "prices_due": 177,
-    "sec_due": true,
-    "finnhub_due": 1592,
-    "finnhub_cached": 809,
-    "price_cached": 2160
+    "universe_due": false,
+    "prices_due": 2184,
+    "sec_due": false,
+    "finnhub_due": 1576,
+    "finnhub_cached": 810,
+    "price_cached": 2162
   },
-  "finished_at": "2026-11-16T19:23:09.260576+00:00",
-  "elapsed_seconds": 2576.5,
+  "finished_at": "2026-11-17T03:43:37.524183+00:00",
+  "elapsed_seconds": 2680.5,
   "counters": {
-    "universe_updated": 2191,
-    "prices_requested": 177,
-    "prices_responses": 176,
-    "prices_useful": 2,
-    "sec_rows": 510,
-    "finnhub_requested": 1597,
+    "universe_updated": 0,
+    "prices_requested": 2184,
+    "prices_responses": 2134,
+    "prices_useful": 1960,
+    "sec_rows": 0,
+    "finnhub_requested": 1600,
     "finnhub_responses": 1400,
     "finnhub_useful": 0,
     "finnhub_errors": 1320,
@@ -39,9 +39,9 @@
   "plan_after": {
     "universe_rows": 2191,
     "universe_due": false,
-    "prices_due": 2009,
+    "prices_due": 0,
     "sec_due": false,
-    "finnhub_due": 1576,
+    "finnhub_due": 1558,
     "finnhub_cached": 810,
     "price_cached": 2162
   },
@@ -51,9 +51,9 @@
     "eligible": 362
   },
   "messages": [
-    "Universum aktualisiert: 2.191 Aktien.",
-    "Kurse: 177 fällig · 2 erfolgreich. Frische Kurse blieben im Cache.",
-    "SEC: 510 US-Aktien aktualisiert.",
+    "Universum ist frisch – übersprungen.",
+    "Kurse: 2184 fällig · 1960 erfolgreich. Frische Kurse blieben im Cache.",
+    "SEC-Fundamentals sind frisch – übersprungen.",
     "Finnhub: 1400 Antworten · 0 mit breiter Kennzahlenabdeckung · 1320 Fehler. Auch dünne erfolgreiche Antworten werden jetzt 14 Tage gecacht statt immer neu geladen."
   ],
   "cache_rows": {
@@ -61,6 +61,6 @@
     "sec": 512,
     "finnhub": 810,
     "prices": 2162,
-    "history": 17850
+    "history": 18200
   }
 }
