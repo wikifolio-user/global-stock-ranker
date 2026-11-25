@@ -1,17 +1,17 @@
 {
-  "started_at": "2026-11-25T03:34:58.673431+00:00",
+  "started_at": "2026-11-25T14:34:59.878145+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2192,
     "universe_due": false,
     "prices_due": 174,
     "sec_due": false,
-    "finnhub_due": 1699,
+    "finnhub_due": 1702,
     "finnhub_cached": 811,
     "price_cached": 2165
   },
-  "finished_at": "2026-11-25T04:25:54.870191+00:00",
-  "elapsed_seconds": 3055.2,
+  "finished_at": "2026-11-25T15:25:30.814192+00:00",
+  "elapsed_seconds": 3029.2,
   "counters": {
     "universe_updated": 0,
     "prices_requested": 174,
@@ -41,7 +41,7 @@
     "universe_due": false,
     "prices_due": 0,
     "sec_due": false,
-    "finnhub_due": 1699,
+    "finnhub_due": 1700,
     "finnhub_cached": 811,
     "price_cached": 2165
   },
