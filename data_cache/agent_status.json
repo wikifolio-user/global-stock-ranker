@@ -1,5 +1,5 @@
 {
-  "started_at": "2026-11-28T08:02:26.240567+00:00",
+  "started_at": "2026-11-28T16:58:32.387777+00:00",
   "ok": true,
   "plan_before": {
     "universe_rows": 2192,
@@ -10,8 +10,8 @@
     "finnhub_cached": 811,
     "price_cached": 2165
   },
-  "finished_at": "2026-11-28T08:52:45.697702+00:00",
-  "elapsed_seconds": 3017.6,
+  "finished_at": "2026-11-28T17:49:49.887099+00:00",
+  "elapsed_seconds": 3075.7,
   "counters": {
     "universe_updated": 0,
     "prices_requested": 174,
